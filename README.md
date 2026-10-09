@@ -1,48 +1,23 @@
-# Omni — Personal AI Agent for Android (Phase 1)
+# Omni — Personal AI Agent for Android
 
 Omni is an open, extensible personal AI agent application built natively for Android using Jetpack Compose, Material 3, Clean Architecture, and Room.
 
-Phase 1 provides the core foundation: real device telemetry inspection, type-safe tool registration and execution framework, persistent chat & task management, and an obsidian-dark personal AI interface.
-
 ---
 
-## 🌟 Features Implemented in Phase 1
+## 🌟 Capabilities Overview
 
-1. **Clean Architecture Foundation**:
-   - **Presentation**: Jetpack Compose, Material 3, custom OLED dark palette, system insets & edge-to-edge support.
-   - **Domain**: Decoupled models, tool registry abstractions, use cases, and action security policies.
-   - **Data**: Room database (`chat_messages` and `tasks` tables), DAOs, repositories, and preferences.
-   - **Device Telemetry**: Real Android APIs for device model, OS, battery, storage, and scoped package inventory.
-   - **AI Layer**: Deterministic local command processor for normalized intent matching.
-   - **Execution Engine**: Type-safe `OmniTool`, `ToolRegistry`, `CommandDispatcher`, and `ActionPolicy`.
+### Phase 1 — Foundation & Telemetry
+- **Clean Architecture Foundation**: Domain, Data, Presentation, Device, Execution, and Security layers.
+- **Real Device Telemetry**: `DeviceInfoProvider`, `StorageInfoProvider`, `BatteryInfoProvider`, `AppInventoryProvider`, and safe `RootDetector`.
+- **Room Database Persistence**: Full persistence for multi-turn chat messages and task lifecycle execution records.
 
-2. **Real Device Information Providers**:
-   - `DeviceInfoProvider`: Hardware manufacturer, model, Android release, SDK API level, and app version.
-   - `StorageInfoProvider`: Primary user volume (`/data`) inspection with total, used, and available bytes.
-   - `BatteryInfoProvider`: Real battery percentage, charging state, and power source via Android `BatteryManager`.
-   - `AppInventoryProvider`: Graceful scoped application inventory respecting modern Android package visibility rules.
-   - `RootDetector`: Passive, safe inspection of standard root indicators (binary presence and test-keys) returning `AVAILABLE`, `NOT_AVAILABLE`, or `UNKNOWN` without executing privileged shell commands.
-
-3. **Registered System Tools**:
-   - `get_device_info`: Hardware, model, OS release, SDK API level, app version, root status.
-   - `get_storage_info`: Primary data volume capacity, available space, used space, percentage.
-   - `get_battery_info`: Battery percentage, charging status, health, temperature.
-   - `get_app_version`: Omni app version and phase identity.
-
-4. **Deterministic Local Natural Language Processing**:
-   - Matches and normalizes supported commands:
-     - `"Show device information."`
-     - `"Check my storage."`
-     - `"Check my battery."`
-     - `"What version of Omni am I using?"`
-   - Honest fallback for unsupported commands:
-     > *"This command is not supported yet. Additional AI and device-control capabilities will be added in later phases."*
-
-5. **Screens & User Interface**:
-   - **Dashboard (Home)**: Live telemetry cards (Hardware, Root status, Battery, Storage progress bar), quick action chips, command bar with send and microphone placeholder, and recent tasks preview.
-   - **Chat**: Conversation stream, message bubbles, timestamps, typing indicators, suggestion chips, and clear history.
-   - **Tasks**: Historical execution log with status badges (`PENDING`, `RUNNING`, `SUCCEEDED`, `FAILED`, `CANCELLED`), timing, request details, and result summaries.
-   - **Settings**: App version, theme mode selector (Dark, Light, System), registered tool catalog with risk levels, permissions status, and privacy manifesto.
+### Phase 2 — AI Brain, Natural-Language Understanding, and Tool Calling
+- **Provider-Independent AI Abstraction**: `AiProvider`, `AiRequest`, `AiResponse`, `AiMessage`, `AiToolCall`, `AiToolResult`, and `AiToolSchema`.
+- **Cloud AI Provider**: Official Gemini REST API (`gemini-2.0-flash`, `gemini-1.5-flash`, `gemini-1.5-pro`) with native function/tool declarations, tool execution, and grounded final answers.
+- **Bounded Agent Orchestrator**: Multi-turn tool execution loop with configurable iteration limits, request timeouts (45s), cancellation support, and protection against infinite loops.
+- **Deterministic Local Fallback**: Fast offline execution for recognized local commands (`Check my battery`, `Check my storage`, `Show device information`, `What version of Omni am I using?`).
+- **Secure Credential Storage**: Private on-device SharedPreferences storage; zero API keys committed, logged, or hardcoded in APKs.
+- **Dynamic Progress UI**: Real-time agent status indicators (e.g. *"Understanding your request..."*, *"Executing battery status..."*, *"Synthesizing results..."*) with one-tap cancellation.
 
 ---
 
@@ -54,7 +29,7 @@ app/src/main/java/com/omni/assistant/
 ├── MainActivity.kt              # Root activity with edge-to-edge support
 ├── core/
 │   ├── common/                  # OmniResult, DispatcherProvider
-│   ├── logging/                 # OmniLogger (structured, credential-safe)
+│   ├── logging/                 # OmniLogger (structured, credential-redacted)
 │   └── permissions/             # PermissionChecker
 ├── domain/
 │   ├── model/                   # DeviceStatus, BatteryStatus, StorageStatus, TaskItem, ChatMessage
@@ -68,15 +43,20 @@ app/src/main/java/com/omni/assistant/
 │   └── repository/              # Repository implementations
 ├── device/                      # Telemetry providers (DeviceInfo, Battery, Storage, Root)
 ├── execution/                   # ToolDefinition, ToolResult, OmniTool, ToolRegistry, CommandDispatcher
-├── ai/                          # AiProvider, LocalCommandProcessor, AiRequest/Response
+├── ai/                          # AI Brain & Orchestration
+│   ├── AiModels.kt              # Provider-agnostic models (AiRequest, AiResponse, AiMessage, AiToolCall)
+│   ├── LocalCommandProcessor.kt # Deterministic local command matcher
+│   ├── config/                  # AiConfigRepository (safe on-device API key storage)
+│   ├── gemini/                  # GeminiAiProvider (Google AI Studio REST integration)
+│   └── orchestrator/            # AgentOrchestrator (bounded multi-turn tool execution loop)
 ├── security/                    # ActionPolicy, StandardActionPolicy
 └── presentation/
     ├── navigation/              # Screen, OmniNavHost, BottomNavigationBar
     ├── theme/                   # Color, Type, Shape, Theme (Dark OLED default)
     ├── home/                    # HomeScreen & HomeViewModel
-    ├── chat/                    # ChatScreen & ChatViewModel
+    ├── chat/                    # ChatScreen & ChatViewModel (live agent progress)
     ├── tasks/                   # TasksScreen & TasksViewModel
-    └── settings/                # SettingsScreen & SettingsViewModel
+    └── settings/                # SettingsScreen & SettingsViewModel (Gemini API key & model configuration)
 ```
 
 ---
@@ -90,7 +70,7 @@ app/src/main/java/com/omni/assistant/
 
 ### Build Commands
 
-Run unit tests:
+Run all 25 unit tests:
 ```bash
 ./gradlew test
 ```
@@ -109,13 +89,11 @@ app/build/outputs/apk/debug/app-debug.apk
 
 ## 📲 Installing on Connected Android Device
 
-Ensure USB debugging is enabled on your device (e.g. OnePlus 12R):
-
 ```bash
-# Verify device connection
+# Verify device connection (e.g. OnePlus 12R via USB or Wireless ADB)
 adb devices
 
-# Install APK directly
+# Install APK
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 # Launch Omni Assistant
@@ -124,9 +102,10 @@ adb shell am start -n com.omni.assistant.debug/com.omni.assistant.MainActivity
 
 ---
 
-## 🔮 Roadmap: Deferred to Phase 2
-- Cloud LLM & Local On-Device AI models (Gemini Nano / LiteRT / Local SLM).
-- Real voice recognition and TTS audio responses.
-- Accessibility service integration for authorized UI automation.
-- Root execution sandbox for privileged device operations.
-- Multi-step task planner and self-correcting error recovery loops.
+## 🔑 Configuring Cloud AI (Gemini API)
+
+1. Open **Omni** on your device and navigate to the **Settings** tab.
+2. In the **AI Brain & Intelligence** section, enter your [Google AI Studio](https://aistudio.google.com/) API Key (`AIzaSy...`).
+3. Tap **Save Key**.
+4. Select your preferred Gemini model (`gemini-2.0-flash` is selected by default).
+5. Switch to the **Chat** tab to issue natural-language instructions (e.g., *"How much free space do I have left?"*, *"Inspect my battery health"*).

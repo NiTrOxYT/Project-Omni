@@ -3,6 +3,10 @@ package com.omni.assistant
 import android.app.Application
 import com.omni.assistant.ai.AiProvider
 import com.omni.assistant.ai.LocalCommandProcessor
+import com.omni.assistant.ai.config.AiConfigRepository
+import com.omni.assistant.ai.config.AiConfigRepositoryImpl
+import com.omni.assistant.ai.gemini.GeminiAiProvider
+import com.omni.assistant.ai.orchestrator.AgentOrchestrator
 import com.omni.assistant.core.logging.OmniLogger
 import com.omni.assistant.data.local.database.OmniDatabase
 import com.omni.assistant.data.repository.ChatRepositoryImpl
@@ -47,6 +51,10 @@ class OmniAppContainer(private val application: Application) {
         SettingsRepositoryImpl(application)
     }
 
+    val aiConfigRepository: AiConfigRepository by lazy {
+        AiConfigRepositoryImpl(application)
+    }
+
     val deviceInfoProvider: DeviceInfoProvider by lazy {
         DeviceInfoProvider(application)
     }
@@ -80,17 +88,29 @@ class OmniAppContainer(private val application: Application) {
         CommandDispatcher(toolRegistry, actionPolicy)
     }
 
-    val aiProvider: AiProvider by lazy {
+    val localCommandProcessor: LocalCommandProcessor by lazy {
         LocalCommandProcessor()
     }
 
-    val processCommandUseCase: ProcessCommandUseCase by lazy {
-        ProcessCommandUseCase(
-            aiProvider = aiProvider,
+    val cloudAiProvider: AiProvider by lazy {
+        GeminiAiProvider(aiConfigRepository)
+    }
+
+    val agentOrchestrator: AgentOrchestrator by lazy {
+        AgentOrchestrator(
+            cloudAiProvider = cloudAiProvider,
+            localCommandProcessor = localCommandProcessor,
+            aiConfigRepository = aiConfigRepository,
+            toolRegistry = toolRegistry,
+            actionPolicy = actionPolicy,
             commandDispatcher = commandDispatcher,
             chatRepository = chatRepository,
             taskRepository = taskRepository
         )
+    }
+
+    val processCommandUseCase: ProcessCommandUseCase by lazy {
+        ProcessCommandUseCase(agentOrchestrator)
     }
 
     val getDeviceInfoUseCase: GetDeviceInfoUseCase by lazy {
@@ -120,7 +140,7 @@ class OmniApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        OmniLogger.i("OmniApp", "Initializing Omni Application (Phase 1)")
+        OmniLogger.i("OmniApp", "Initializing Omni Application (Phase 2 - Agent Intelligence)")
         container = OmniAppContainer(this)
     }
 }

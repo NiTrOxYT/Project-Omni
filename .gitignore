@@ -12,3 +12,8 @@ build/
 app/build/
 *.apk
 *.aab
+secrets.properties
+local_ai_config.json
+*.secret
+*.env
+.agents

@@ -38,14 +38,18 @@ object OmniLogger {
 
     fun e(tag: String, message: String, throwable: Throwable? = null) {
         val sanitized = sanitize(message)
+        val errorSuffix = throwable?.let {
+            " | [${it.javaClass.simpleName}] ${sanitize(it.message ?: "")}"
+        } ?: ""
+        val fullMessage = "$sanitized$errorSuffix"
         try {
             if (throwable != null) {
-                Log.e("$TAG_PREFIX:$tag", sanitized, throwable)
+                Log.e("$TAG_PREFIX:$tag", fullMessage, throwable)
             } else {
-                Log.e("$TAG_PREFIX:$tag", sanitized)
+                Log.e("$TAG_PREFIX:$tag", fullMessage)
             }
         } catch (e: RuntimeException) {
-            System.err.println("ERROR: [$TAG_PREFIX:$tag] $sanitized ${throwable?.message ?: ""}")
+            System.err.println("ERROR: [$TAG_PREFIX:$tag] $fullMessage")
         }
     }
 

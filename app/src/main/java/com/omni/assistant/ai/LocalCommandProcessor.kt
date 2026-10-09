@@ -18,6 +18,10 @@ class LocalCommandProcessor : AiProvider {
         }
     }
 
+    override suspend fun generateResponse(request: AiRequest): AiResponse {
+        return process(request)
+    }
+
     override suspend fun process(request: AiRequest): AiResponse {
         val normalized = normalize(request.prompt)
         OmniLogger.d(tag, "Processing prompt: '$normalized'")

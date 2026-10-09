@@ -171,6 +171,7 @@ fun rememberSettingsViewModel(container: OmniAppContainer): SettingsViewModel {
     return androidx.lifecycle.viewmodel.compose.viewModel {
         SettingsViewModel(
             settingsRepository = container.settingsRepository,
+            aiConfigRepository = container.aiConfigRepository,
             getDeviceInfoUseCase = container.getDeviceInfoUseCase,
             toolRegistry = container.toolRegistry
         )

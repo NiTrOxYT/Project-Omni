@@ -32,6 +32,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Person
@@ -177,7 +178,10 @@ fun ChatScreen(
 
                     if (uiState.isLoading) {
                         item {
-                            TypingIndicator()
+                            TypingIndicator(
+                                status = uiState.agentStatus ?: "Thinking...",
+                                onCancel = { viewModel.cancelActiveRequest() }
+                            )
                         }
                     }
                 }
@@ -368,7 +372,10 @@ fun ChatMessageBubble(message: ChatMessage) {
 }
 
 @Composable
-fun TypingIndicator() {
+fun TypingIndicator(
+    status: String,
+    onCancel: () -> Unit
+) {
     val transition = rememberInfiniteTransition(label = "pulse")
     val alpha by transition.animateFloat(
         initialValue = 0.3f,
@@ -400,11 +407,20 @@ fun TypingIndicator() {
                         .clip(CircleShape)
                         .background(AccentCyan)
                 )
-                Spacer(modifier = Modifier.width(6.dp))
+                Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "Analyzing instruction...",
+                    text = status,
                     style = MaterialTheme.typography.labelMedium,
                     color = TextSecondaryDark
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Cancel",
+                    tint = TextTertiaryDark,
+                    modifier = Modifier
+                        .size(16.dp)
+                        .clickable { onCancel() }
                 )
             }
         }

@@ -2,6 +2,7 @@ package com.omni.assistant.presentation.settings
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,35 +21,48 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DarkMode
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Memory
-import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.omni.assistant.domain.repository.AppThemeMode
@@ -57,6 +71,7 @@ import com.omni.assistant.presentation.theme.AccentCyan
 import com.omni.assistant.presentation.theme.AccentIndigo
 import com.omni.assistant.presentation.theme.BorderDark
 import com.omni.assistant.presentation.theme.StatusSuccess
+import com.omni.assistant.presentation.theme.StatusWarning
 import com.omni.assistant.presentation.theme.SurfaceDark
 import com.omni.assistant.presentation.theme.SurfaceVariantDark
 import com.omni.assistant.presentation.theme.TextPrimaryDark
@@ -69,8 +84,13 @@ fun SettingsScreen(
     viewModel: SettingsViewModel
 ) {
     val themeMode by viewModel.themeMode.collectAsState()
+    val aiConfig by viewModel.aiConfig.collectAsState()
     val deviceStatus = viewModel.deviceStatus
     val tools = viewModel.registeredTools
+
+    var apiKeyInput by remember(aiConfig.apiKey) { mutableStateOf(aiConfig.apiKey) }
+    var isApiKeyVisible by remember { mutableStateOf(false) }
+    var isKeySavedBannerVisible by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -131,15 +151,217 @@ fun SettingsScreen(
                             color = TextPrimaryDark
                         )
                         Text(
-                            text = "Version ${deviceStatus.appVersion}",
+                            text = "Version 1.0.0-phase2",
                             style = MaterialTheme.typography.bodyMedium,
                             color = AccentCyan
                         )
                         Text(
-                            text = "Phase 1: Foundation & Local Telemetry",
+                            text = "Phase 2: AI Brain & Structured Tool Calling",
                             style = MaterialTheme.typography.labelSmall,
                             color = TextSecondaryDark
                         )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // AI Brain / Provider Configuration
+            SettingsSectionHeader(title = "AI Brain & Intelligence", icon = Icons.Default.Memory)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+                border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    // Status Badge Row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Engine Status",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = TextPrimaryDark
+                        )
+                        val isHybrid = aiConfig.hasValidApiKey && aiConfig.useCloudAi
+                        val badgeColor = if (isHybrid) StatusSuccess else StatusWarning
+                        val badgeText = if (isHybrid) "HYBRID (GEMINI + LOCAL)" else "LOCAL FALLBACK ONLY"
+
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(badgeColor.copy(alpha = 0.15f))
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = badgeText,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = badgeColor
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Cloud AI Toggle
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Enable Cloud AI Integration",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium,
+                                color = TextPrimaryDark
+                            )
+                            Text(
+                                text = "Sends natural language commands to Gemini for tool planning and grounded answers.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = TextSecondaryDark
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Switch(
+                            checked = aiConfig.useCloudAi,
+                            onCheckedChange = { viewModel.updateUseCloudAi(it) },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = AccentCyan,
+                                checkedTrackColor = AccentCyan.copy(alpha = 0.3f),
+                                uncheckedThumbColor = TextTertiaryDark,
+                                uncheckedTrackColor = SurfaceVariantDark
+                            )
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Model Selection Chips
+                    Text(
+                        text = "Gemini Model",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = TextSecondaryDark
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    val availableModels = listOf("gemini-flash-latest", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro")
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        availableModels.forEach { modelName ->
+                            val isSelected = aiConfig.modelName == modelName
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = { viewModel.updateModel(modelName) },
+                                label = {
+                                    Text(
+                                        text = modelName,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    containerColor = SurfaceVariantDark,
+                                    labelColor = TextSecondaryDark,
+                                    selectedContainerColor = AccentCyan.copy(alpha = 0.2f),
+                                    selectedLabelColor = AccentCyan
+                                ),
+                                border = FilterChipDefaults.filterChipBorder(
+                                    borderColor = if (isSelected) AccentCyan else BorderDark,
+                                    enabled = true,
+                                    selected = isSelected
+                                ),
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Gemini API Key Input
+                    Text(
+                        text = "Gemini API Key",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = TextSecondaryDark
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    OutlinedTextField(
+                        value = apiKeyInput,
+                        onValueChange = {
+                            apiKeyInput = it
+                            isKeySavedBannerVisible = false
+                        },
+                        placeholder = {
+                            Text(
+                                text = "Enter AI Studio API Key (AIzaSy...)",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = TextTertiaryDark
+                            )
+                        },
+                        visualTransformation = if (isApiKeyVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = SurfaceVariantDark,
+                            unfocusedContainerColor = SurfaceVariantDark,
+                            focusedBorderColor = AccentCyan,
+                            unfocusedBorderColor = BorderDark,
+                            focusedTextColor = TextPrimaryDark,
+                            unfocusedTextColor = TextPrimaryDark
+                        ),
+                        trailingIcon = {
+                            IconButton(onClick = { isApiKeyVisible = !isApiKeyVisible }) {
+                                Icon(
+                                    imageVector = if (isApiKeyVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = "Toggle key visibility",
+                                    tint = TextSecondaryDark
+                                )
+                            }
+                        },
+                        singleLine = true
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (isKeySavedBannerVisible) "✓ API Key Saved!" else if (aiConfig.hasValidApiKey) "✓ API Key configured" else "No key configured",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (aiConfig.hasValidApiKey || isKeySavedBannerVisible) StatusSuccess else TextTertiaryDark
+                        )
+
+                        Button(
+                            onClick = {
+                                viewModel.updateApiKey(apiKeyInput)
+                                isKeySavedBannerVisible = true
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = AccentCyan,
+                                contentColor = SurfaceDark
+                            ),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                text = "Save Key",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }
@@ -182,53 +404,6 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // AI Provider Status
-            SettingsSectionHeader(title = "AI Intelligence Engine", icon = Icons.Default.Memory)
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = SurfaceDark),
-                border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Active Provider",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = TextPrimaryDark
-                        )
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(StatusSuccess.copy(alpha = 0.15f))
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Text(
-                                text = "LOCAL ENGINE",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = StatusSuccess
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Deterministic natural-language dispatcher with normalized pattern matching. Cloud AI integration and on-device LLM inference are planned for Phase 2.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextSecondaryDark
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
             // Device Control Capabilities / Registered Tools
             SettingsSectionHeader(title = "Registered Capabilities", icon = Icons.Default.Build)
             Spacer(modifier = Modifier.height(8.dp))
@@ -260,20 +435,20 @@ fun SettingsScreen(
             ) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     PrivacyBulletPoint(
-                        title = "Zero Credentials Stored",
-                        desc = "Omni does not store API keys, passwords, or personal credentials."
+                        title = "Secure Local Credential Storage",
+                        desc = "API keys are stored exclusively in private on-device SharedPreferences and never embedded, committed, or transmitted."
                     )
                     PrivacyBulletPoint(
-                        title = "On-Device Execution",
-                        desc = "All telemetry and tool dispatch operations are computed 100% locally on your device."
+                        title = "Scoped Device Tool Invocation",
+                        desc = "The AI model cannot execute arbitrary shell commands or code; it can only invoke declared, type-safe local tools through ActionPolicy."
                     )
                     PrivacyBulletPoint(
-                        title = "No Unprivileged Shells",
-                        desc = "Commands are strictly dispatched to registered, type-safe local tools rather than arbitrary shell executors."
+                        title = "Minimal Context Transmission",
+                        desc = "Only recent chat messages and registered tool schemas are transmitted to the AI provider. No contacts, notifications, or background files are shared."
                     )
                     PrivacyBulletPoint(
-                        title = "Scoped Package Visibility",
-                        desc = "Does not request QUERY_ALL_PACKAGES or broad accessibility services in Phase 1."
+                        title = "Offline Local Fallback",
+                        desc = "Deterministic telemetry commands (battery, storage, device info) continue working locally even without an internet connection or API key."
                     )
                 }
             }
