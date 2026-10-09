@@ -175,36 +175,69 @@ fun HomeScreen(
             Spacer(modifier = Modifier.height(20.dp))
 
             // Assistant Status Banner
+            val a11yStatus by com.omni.assistant.accessibility.AccessibilityConnectionManager.serviceStatus.collectAsState()
+            val context = androidx.compose.ui.platform.LocalContext.current
+            LaunchedEffect(Unit) {
+                com.omni.assistant.accessibility.AccessibilityConnectionManager.checkAndRefreshStatus(context)
+            }
+
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
                 color = SurfaceDark,
                 border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark)
             ) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(12.dp)
-                            .clip(CircleShape)
-                            .background(StatusSuccess)
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text(
-                            text = "Core Engine Active",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = TextPrimaryDark,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = "Local deterministic execution mode",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = TextSecondaryDark
-                        )
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(10.dp)
+                                    .clip(CircleShape)
+                                    .background(StatusSuccess)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "AI Brain Ready",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = TextPrimaryDark,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        val (a11yText, a11yColor) = when (a11yStatus) {
+                            com.omni.assistant.accessibility.AccessibilityStatus.CONNECTED -> "A11Y READY" to StatusSuccess
+                            com.omni.assistant.accessibility.AccessibilityStatus.DISCONNECTED -> "A11Y DISCONNECTED" to StatusWarning
+                            com.omni.assistant.accessibility.AccessibilityStatus.NOT_ENABLED -> "A11Y DISABLED" to TextSecondaryDark
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(a11yColor.copy(alpha = 0.15f))
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                text = a11yText,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = a11yColor,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = when (a11yStatus) {
+                            com.omni.assistant.accessibility.AccessibilityStatus.CONNECTED -> "Full UI inspection & automation enabled"
+                            else -> "Enable Accessibility in Settings for screen automation"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondaryDark
+                    )
                 }
             }
 

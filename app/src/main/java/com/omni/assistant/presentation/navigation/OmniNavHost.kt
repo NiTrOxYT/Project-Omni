@@ -173,7 +173,8 @@ fun rememberSettingsViewModel(container: OmniAppContainer): SettingsViewModel {
             settingsRepository = container.settingsRepository,
             aiConfigRepository = container.aiConfigRepository,
             getDeviceInfoUseCase = container.getDeviceInfoUseCase,
-            toolRegistry = container.toolRegistry
+            toolRegistry = container.toolRegistry,
+            aiAppBridge = container.aiAppBridge
         )
     }
 }

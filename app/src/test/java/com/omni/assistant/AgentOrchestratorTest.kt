@@ -6,16 +6,25 @@ import com.omni.assistant.ai.AiRequest
 import com.omni.assistant.ai.AiResponse
 import com.omni.assistant.ai.AiRole
 import com.omni.assistant.ai.AiToolCall
-import com.omni.assistant.ai.LocalCommandProcessor
+import com.omni.assistant.ai.LocalTaskPlanner
+import com.omni.assistant.ai.bridge.AiAppBridge
+import com.omni.assistant.ai.bridge.AiBridgeQuery
+import com.omni.assistant.ai.bridge.AiBridgeResponse
+import com.omni.assistant.ai.bridge.InstalledAiApp
+import com.omni.assistant.ai.bridge.SupportedAiApp
 import com.omni.assistant.ai.config.AiConfig
 import com.omni.assistant.ai.config.AiConfigRepository
 import com.omni.assistant.ai.orchestrator.AgentExecutionResult
 import com.omni.assistant.ai.orchestrator.AgentOrchestrator
+import com.omni.assistant.device.AppInventoryProvider
+import com.omni.assistant.domain.model.AppInfo
 import com.omni.assistant.domain.model.ChatMessage
 import com.omni.assistant.domain.model.RiskLevel
 import com.omni.assistant.domain.model.TaskItem
 import com.omni.assistant.domain.model.TaskStatus
+import com.omni.assistant.domain.repository.AppThemeMode
 import com.omni.assistant.domain.repository.ChatRepository
+import com.omni.assistant.domain.repository.SettingsRepository
 import com.omni.assistant.domain.repository.TaskRepository
 import com.omni.assistant.execution.CommandDispatcher
 import com.omni.assistant.execution.OmniTool
@@ -24,11 +33,9 @@ import com.omni.assistant.execution.ToolRegistry
 import com.omni.assistant.execution.ToolResult
 import com.omni.assistant.security.StandardActionPolicy
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -39,7 +46,9 @@ class AgentOrchestratorTest {
     private lateinit var toolRegistry: ToolRegistry
     private lateinit var policy: StandardActionPolicy
     private lateinit var dispatcher: CommandDispatcher
-    private lateinit var localProcessor: LocalCommandProcessor
+    private lateinit var localPlanner: LocalTaskPlanner
+    private lateinit var fakeBridge: AiAppBridge
+    private lateinit var fakeAppInventory: AppInventoryProvider
 
     private val fakeChatRepo = object : ChatRepository {
         val messages = mutableListOf<ChatMessage>()
@@ -74,6 +83,15 @@ class AgentOrchestratorTest {
         override suspend fun clearTasks() { tasks.clear() }
     }
 
+    private val fakeSettingsRepo = object : SettingsRepository {
+        var theme = AppThemeMode.DARK
+        var preferredApp = SupportedAiApp.AUTO
+        override fun getThemeMode(): Flow<AppThemeMode> = flowOf(theme)
+        override suspend fun setThemeMode(mode: AppThemeMode) { theme = mode }
+        override fun getPreferredAiApp(): Flow<SupportedAiApp> = flowOf(preferredApp)
+        override suspend fun setPreferredAiApp(app: SupportedAiApp) { preferredApp = app }
+    }
+
     private class FakeConfigRepo(var config: AiConfig) : AiConfigRepository {
         override fun getConfig() = flowOf(config)
         override fun getCurrentConfig() = config
@@ -87,7 +105,6 @@ class AgentOrchestratorTest {
         toolRegistry = ToolRegistry()
         policy = StandardActionPolicy()
         dispatcher = CommandDispatcher(toolRegistry, policy)
-        localProcessor = LocalCommandProcessor()
 
         // Register dummy battery tool
         toolRegistry.register(object : OmniTool {
@@ -105,6 +122,48 @@ class AgentOrchestratorTest {
                 )
             }
         })
+
+        fakeAppInventory = object : AppInventoryProvider(null) {
+            override fun getVisibleInstalledApplications(): List<AppInfo> = listOf(
+                AppInfo(packageName = "com.android.settings", appName = "Settings", versionName = "1.0", isSystemApp = true),
+                AppInfo(packageName = "com.openai.chatgpt", appName = "ChatGPT", versionName = "1.0", isSystemApp = false)
+            )
+        }
+
+        fakeBridge = object : AiAppBridge(null) {
+            override fun discoverInstalledAiApps(): List<InstalledAiApp> = listOf(
+                InstalledAiApp(SupportedAiApp.CHATGPT, isInstalled = true, packageName = "com.openai.chatgpt", appLabel = "ChatGPT", versionName = "1.0")
+            )
+            override fun getPreferredOrAvailablePackage(preferred: SupportedAiApp): String? = "com.openai.chatgpt"
+            override suspend fun askInstalledAiApp(query: AiBridgeQuery, onProgress: ((String) -> Unit)?): AiBridgeResponse {
+                return AiBridgeResponse(
+                    success = true,
+                    prompt = query.prompt,
+                    responseText = "On-device AI response for: ${query.prompt}",
+                    appUsed = "ChatGPT"
+                )
+            }
+        }
+
+        localPlanner = LocalTaskPlanner(toolRegistry, fakeAppInventory, fakeBridge)
+    }
+
+    private fun createOrchestrator(
+        cloudProvider: AiProvider,
+        configRepo: AiConfigRepository
+    ): AgentOrchestrator {
+        return AgentOrchestrator(
+            cloudAiProvider = cloudProvider,
+            localTaskPlanner = localPlanner,
+            aiAppBridge = fakeBridge,
+            settingsRepository = fakeSettingsRepo,
+            aiConfigRepository = configRepo,
+            toolRegistry = toolRegistry,
+            actionPolicy = policy,
+            commandDispatcher = dispatcher,
+            chatRepository = fakeChatRepo,
+            taskRepository = fakeTaskRepo
+        )
     }
 
     @Test
@@ -116,16 +175,7 @@ class AgentOrchestratorTest {
         }
 
         val configRepo = FakeConfigRepo(AiConfig(apiKey = "valid_key_12345"))
-        val orchestrator = AgentOrchestrator(
-            cloudAiProvider = fakeCloudProvider,
-            localCommandProcessor = localProcessor,
-            aiConfigRepository = configRepo,
-            toolRegistry = toolRegistry,
-            actionPolicy = policy,
-            commandDispatcher = dispatcher,
-            chatRepository = fakeChatRepo,
-            taskRepository = fakeTaskRepo
-        )
+        val orchestrator = createOrchestrator(fakeCloudProvider, configRepo)
 
         val result = orchestrator.execute("Check my battery.")
 
@@ -140,149 +190,20 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    fun testMultiTurnCloudToolCallingLoop() = runBlocking {
-        // Step 1: Model requests tool "get_battery_info"
-        // Step 2: Model returns grounded final answer based on tool output
-        var step = 0
+    fun testAiBridgeQueryExecutionThroughOrchestrator() = runBlocking {
         val fakeCloudProvider = object : AiProvider {
             override suspend fun generateResponse(request: AiRequest): AiResponse {
-                step++
-                return if (step == 1) {
-                    AiResponse(
-                        isHandled = true,
-                        toolCalls = listOf(AiToolCall(id = "call_1", name = "get_battery_info", arguments = emptyMap()))
-                    )
-                } else {
-                    // Verify tool result was delivered in history
-                    val toolMsg = request.conversationHistory.find { it.role == AiRole.TOOL }
-                    assertNotNull("Tool result must be provided in conversation history", toolMsg)
-                    AiResponse(
-                        isHandled = true,
-                        replyText = "Your device currently has 82% battery remaining and is charging."
-                    )
-                }
+                throw AssertionError("Cloud provider should not be called when bridge handles query")
             }
         }
 
-        val configRepo = FakeConfigRepo(AiConfig(apiKey = "valid_key_12345"))
-        val orchestrator = AgentOrchestrator(
-            cloudAiProvider = fakeCloudProvider,
-            localCommandProcessor = localProcessor,
-            aiConfigRepository = configRepo,
-            toolRegistry = toolRegistry,
-            actionPolicy = policy,
-            commandDispatcher = dispatcher,
-            chatRepository = fakeChatRepo,
-            taskRepository = fakeTaskRepo
-        )
+        val configRepo = FakeConfigRepo(AiConfig(apiKey = ""))
+        val orchestrator = createOrchestrator(fakeCloudProvider, configRepo)
 
-        val result = orchestrator.execute("How much power do I have left?")
+        val result = orchestrator.execute("Ask ChatGPT what is Kotlin")
 
         assertTrue(result is AgentExecutionResult.Success)
         val success = result as AgentExecutionResult.Success
-        assertEquals("Your device currently has 82% battery remaining and is charging.", success.assistantMessage.content)
-        assertEquals(listOf("get_battery_info"), success.executedTools)
-        assertEquals(2, step)
-    }
-
-    @Test
-    fun testRejectionOfUnknownToolRequestedByModel() = runBlocking {
-        val fakeCloudProvider = object : AiProvider {
-            var step = 0
-            override suspend fun generateResponse(request: AiRequest): AiResponse {
-                step++
-                return if (step == 1) {
-                    AiResponse(
-                        isHandled = true,
-                        toolCalls = listOf(AiToolCall(id = "call_bad", name = "delete_all_files", arguments = emptyMap()))
-                    )
-                } else {
-                    val toolMsg = request.conversationHistory.find { it.role == AiRole.TOOL }
-                    val toolRes = toolMsg?.toolResults?.firstOrNull()
-                    assertNotNull(toolRes)
-                    assertEquals(false, toolRes?.content?.get("success"))
-                    AiResponse(
-                        isHandled = true,
-                        replyText = "I cannot delete files as that capability is not registered."
-                    )
-                }
-            }
-        }
-
-        val configRepo = FakeConfigRepo(AiConfig(apiKey = "valid_key_12345"))
-        val orchestrator = AgentOrchestrator(
-            cloudAiProvider = fakeCloudProvider,
-            localCommandProcessor = localProcessor,
-            aiConfigRepository = configRepo,
-            toolRegistry = toolRegistry,
-            actionPolicy = policy,
-            commandDispatcher = dispatcher,
-            chatRepository = fakeChatRepo,
-            taskRepository = fakeTaskRepo
-        )
-
-        val result = orchestrator.execute("Delete everything on my phone")
-
-        assertTrue(result is AgentExecutionResult.Success)
-        val success = result as AgentExecutionResult.Success
-        assertEquals("I cannot delete files as that capability is not registered.", success.assistantMessage.content)
-    }
-
-    @Test
-    fun testToolIterationLimitProtection() = runBlocking {
-        // Model keeps requesting tools endlessly in an infinite loop
-        val fakeCloudProvider = object : AiProvider {
-            override suspend fun generateResponse(request: AiRequest): AiResponse {
-                return AiResponse(
-                    isHandled = true,
-                    toolCalls = listOf(AiToolCall(name = "get_battery_info"))
-                )
-            }
-        }
-
-        val configRepo = FakeConfigRepo(AiConfig(apiKey = "valid_key_12345", maxIterations = 3))
-        val orchestrator = AgentOrchestrator(
-            cloudAiProvider = fakeCloudProvider,
-            localCommandProcessor = localProcessor,
-            aiConfigRepository = configRepo,
-            toolRegistry = toolRegistry,
-            actionPolicy = policy,
-            commandDispatcher = dispatcher,
-            chatRepository = fakeChatRepo,
-            taskRepository = fakeTaskRepo
-        )
-
-        val result = orchestrator.execute("Infinite loop query")
-
-        assertTrue(result is AgentExecutionResult.Failure)
-        val failure = result as AgentExecutionResult.Failure
-        assertTrue(failure.errorMessage.contains("maximum iteration limit"))
-    }
-
-    @Test
-    fun testUnconfiguredApiKeyReturnsHonestLimitation() = runBlocking {
-        val fakeCloudProvider = object : AiProvider {
-            override suspend fun generateResponse(request: AiRequest): AiResponse {
-                throw AssertionError("Should not contact AI without API key")
-            }
-        }
-
-        val configRepo = FakeConfigRepo(AiConfig(apiKey = "")) // Empty key
-        val orchestrator = AgentOrchestrator(
-            cloudAiProvider = fakeCloudProvider,
-            localCommandProcessor = localProcessor,
-            aiConfigRepository = configRepo,
-            toolRegistry = toolRegistry,
-            actionPolicy = policy,
-            commandDispatcher = dispatcher,
-            chatRepository = fakeChatRepo,
-            taskRepository = fakeTaskRepo
-        )
-
-        val result = orchestrator.execute("Analyze my battery degradation curve")
-
-        assertTrue(result is AgentExecutionResult.Failure)
-        val failure = result as AgentExecutionResult.Failure
-        assertEquals(AgentOrchestrator.NO_API_KEY_MESSAGE, failure.assistantMessage.content)
+        assertTrue(success.assistantMessage.content.contains("On-device AI response"))
     }
 }

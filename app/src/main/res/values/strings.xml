@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">Omni</string>
+    <string name="accessibility_service_label">Omni Assistant Automation Service</string>
+    <string name="accessibility_service_description">Enables Omni to observe UI elements and perform user-authorized actions such as opening applications, tapping buttons, and navigating.</string>
 </resources>

@@ -247,10 +247,10 @@ fun EmptyChatGuidance(
         Spacer(modifier = Modifier.height(10.dp))
 
         val suggestions = listOf(
-            "Show device information.",
-            "Check my storage.",
-            "Check my battery.",
-            "What version of Omni am I using?"
+            "Check my battery level.",
+            "Inspect and describe the current screen.",
+            "Open Android Settings app.",
+            "Show device information and storage."
         )
 
         suggestions.forEach { prompt ->

@@ -19,8 +19,16 @@ class SettingsViewModel(
     private val settingsRepository: SettingsRepository,
     private val aiConfigRepository: AiConfigRepository,
     private val getDeviceInfoUseCase: GetDeviceInfoUseCase,
-    private val toolRegistry: ToolRegistry
+    private val toolRegistry: ToolRegistry,
+    val aiAppBridge: com.omni.assistant.ai.bridge.AiAppBridge? = null
 ) : ViewModel() {
+
+    val preferredAiApp: StateFlow<com.omni.assistant.ai.bridge.SupportedAiApp> = settingsRepository.getPreferredAiApp()
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = com.omni.assistant.ai.bridge.SupportedAiApp.AUTO
+        )
 
     val themeMode: StateFlow<AppThemeMode> = settingsRepository.getThemeMode()
         .stateIn(
@@ -39,6 +47,12 @@ class SettingsViewModel(
     val deviceStatus: DeviceStatus = getDeviceInfoUseCase()
 
     val registeredTools: List<ToolDefinition> = toolRegistry.getAllDefinitions()
+
+    fun setPreferredAiApp(app: com.omni.assistant.ai.bridge.SupportedAiApp) {
+        viewModelScope.launch {
+            settingsRepository.setPreferredAiApp(app)
+        }
+    }
 
     fun setThemeMode(mode: AppThemeMode) {
         viewModelScope.launch {

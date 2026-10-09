@@ -27,10 +27,17 @@ import com.omni.assistant.domain.usecase.GetTasksUseCase
 import com.omni.assistant.domain.usecase.ProcessCommandUseCase
 import com.omni.assistant.execution.CommandDispatcher
 import com.omni.assistant.execution.ToolRegistry
+import com.omni.assistant.execution.tools.EnterTextTool
+import com.omni.assistant.execution.tools.GetAccessibilityStatusTool
 import com.omni.assistant.execution.tools.GetAppVersionTool
 import com.omni.assistant.execution.tools.GetBatteryInfoTool
 import com.omni.assistant.execution.tools.GetDeviceInfoTool
 import com.omni.assistant.execution.tools.GetStorageInfoTool
+import com.omni.assistant.execution.tools.GetUiSnapshotTool
+import com.omni.assistant.execution.tools.LaunchAppTool
+import com.omni.assistant.execution.tools.NavigateBackTool
+import com.omni.assistant.execution.tools.ScrollUiTool
+import com.omni.assistant.execution.tools.TapElementTool
 import com.omni.assistant.security.ActionPolicy
 import com.omni.assistant.security.StandardActionPolicy
 
@@ -77,6 +84,13 @@ class OmniAppContainer(private val application: Application) {
             register(GetStorageInfoTool(storageInfoProvider))
             register(GetBatteryInfoTool(batteryInfoProvider))
             register(GetAppVersionTool(deviceInfoProvider))
+            register(GetAccessibilityStatusTool(application))
+            register(GetUiSnapshotTool())
+            register(LaunchAppTool(application, appInventoryProvider))
+            register(TapElementTool())
+            register(EnterTextTool())
+            register(ScrollUiTool())
+            register(NavigateBackTool())
         }
     }
 
@@ -88,8 +102,16 @@ class OmniAppContainer(private val application: Application) {
         CommandDispatcher(toolRegistry, actionPolicy)
     }
 
-    val localCommandProcessor: LocalCommandProcessor by lazy {
-        LocalCommandProcessor()
+    val aiAppBridge: com.omni.assistant.ai.bridge.AiAppBridge by lazy {
+        com.omni.assistant.ai.bridge.AiAppBridge(application)
+    }
+
+    val localTaskPlanner: com.omni.assistant.ai.LocalTaskPlanner by lazy {
+        com.omni.assistant.ai.LocalTaskPlanner(
+            toolRegistry = toolRegistry,
+            appInventoryProvider = appInventoryProvider,
+            aiAppBridge = aiAppBridge
+        )
     }
 
     val cloudAiProvider: AiProvider by lazy {
@@ -99,7 +121,9 @@ class OmniAppContainer(private val application: Application) {
     val agentOrchestrator: AgentOrchestrator by lazy {
         AgentOrchestrator(
             cloudAiProvider = cloudAiProvider,
-            localCommandProcessor = localCommandProcessor,
+            localTaskPlanner = localTaskPlanner,
+            aiAppBridge = aiAppBridge,
+            settingsRepository = settingsRepository,
             aiConfigRepository = aiConfigRepository,
             toolRegistry = toolRegistry,
             actionPolicy = actionPolicy,
