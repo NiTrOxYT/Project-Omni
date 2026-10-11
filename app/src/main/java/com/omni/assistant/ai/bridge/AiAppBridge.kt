@@ -192,6 +192,9 @@ open class AiAppBridge(
             )
         }
 
+        // Record pre-existing screen texts before typing prompt to prevent extracting stale messages
+        val preExistingTexts = snapshot.elements.mapNotNull { it.text?.trim() }.filter { it.isNotBlank() }.toSet()
+
         onProgress?.invoke("Entering prompt into $appDisplayName...")
         val enterResult = AccessibilityConnectionManager.performEnterText(
             snapshotId = snapshot.snapshotId,
@@ -235,7 +238,7 @@ open class AiAppBridge(
             val freshSnap = AccessibilityConnectionManager.takeSnapshot()
 
             val isGenerating = isStillGenerating(freshSnap)
-            val extracted = extractAiResponseText(freshSnap, query.prompt, targetPackage)
+            val extracted = extractAiResponseText(freshSnap, query.prompt, targetPackage, preExistingTexts)
 
             if (!extracted.isNullOrBlank()) {
                 if (extracted == lastCandidateText && !isGenerating) {
@@ -356,7 +359,12 @@ open class AiAppBridge(
         }
     }
 
-    private fun extractAiResponseText(snapshot: UiSnapshot, prompt: String, targetPackage: String): String? {
+    private fun extractAiResponseText(
+        snapshot: UiSnapshot,
+        prompt: String,
+        targetPackage: String,
+        preExistingTexts: Set<String> = emptySet()
+    ): String? {
         val promptClean = prompt.trim().lowercase()
         val ignoredTerms = listOf(
             "chatgpt", "gemini", "openai", "google", "message", "ask gemini", "send", "submit",
@@ -371,6 +379,9 @@ open class AiAppBridge(
             val t = elem.text?.trim() ?: ""
             if (t.length < 3) return@filter false
             val tLower = t.lowercase()
+
+            // Exclude text that was already visible before submitting this prompt (prevents stale response reuse)
+            if (preExistingTexts.contains(t) || preExistingTexts.any { it.equals(t, ignoreCase = true) }) return@filter false
 
             // Exclude exact match with user prompt
             if (tLower == promptClean) return@filter false

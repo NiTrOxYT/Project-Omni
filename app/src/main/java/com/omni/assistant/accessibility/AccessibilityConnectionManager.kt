@@ -102,7 +102,18 @@ object AccessibilityConnectionManager {
         }
     }
 
+    private var testSnapshotOverride: UiSnapshot? = null
+
+    fun overrideCurrentSnapshotForTesting(snapshot: UiSnapshot?) {
+        testSnapshotOverride = snapshot
+        lastSnapshot = snapshot
+    }
+
     fun takeSnapshot(): UiSnapshot {
+        testSnapshotOverride?.let {
+            lastSnapshot = it
+            return it
+        }
         val root = getActiveRoot()
         val snapshot = AccessibilitySnapshotEngine.createSnapshot(root)
         try {
@@ -114,10 +125,18 @@ object AccessibilityConnectionManager {
 
     fun clearSnapshots() {
         lastSnapshot = null
+        testSnapshotOverride = null
         OmniLogger.d(TAG, "Transient UI snapshots and element caches cleared.")
     }
 
     suspend fun performTap(snapshotId: String, elementId: String): AutomationActionResult {
+        if (testSnapshotOverride != null) {
+            return AutomationActionResult(
+                success = true,
+                action = "tap_element",
+                message = "Tapped element '$elementId' successfully (test override)."
+            )
+        }
         if (!isServiceConnected()) {
             return AutomationActionResult(
                 success = false,

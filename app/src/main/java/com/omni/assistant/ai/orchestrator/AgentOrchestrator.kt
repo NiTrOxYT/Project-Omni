@@ -1,6 +1,8 @@
 package com.omni.assistant.ai.orchestrator
 
 import com.omni.assistant.accessibility.AccessibilityConnectionManager
+import com.omni.assistant.accessibility.UiElement
+import com.omni.assistant.accessibility.UiSnapshot
 import com.omni.assistant.accessibility.lifecycle.SnapshotLifecycleManager
 import com.omni.assistant.accessibility.observation.ObservationClassifier
 import com.omni.assistant.accessibility.observation.ScreenObservation
@@ -204,7 +206,7 @@ class AgentOrchestrator(
                             }
 
                             is LocalPlanResult.NeedsAiBridge -> {
-                                if (planResult.isDirectQuery) {
+                                if (planResult.isDirectQuery || planResult.isGeneralQuestion) {
                                     val targetApp = if (planResult.targetApp != SupportedAiApp.AUTO) planResult.targetApp else preferredAiApp
                                     onProgress?.invoke("Asking ${targetApp.displayName}...")
                                     val bridgeResponse = aiAppBridge.askInstalledAiApp(
@@ -215,15 +217,57 @@ class AgentOrchestrator(
                                         ),
                                         onProgress = onProgress
                                     )
-                                    if (bridgeResponse.success) {
-                                        taskState.finalResponseText = bridgeResponse.responseText ?: "Received response from ${targetApp.displayName}."
+                                    if (bridgeResponse.success && !bridgeResponse.responseText.isNullOrBlank()) {
+                                        taskState.finalResponseText = bridgeResponse.responseText
                                         taskState.status = TaskStatus.SUCCEEDED
                                     } else {
-                                        taskState.finalErrorText = bridgeResponse.error ?: "Failed to get response from ${targetApp.displayName}."
+                                        taskState.finalErrorText = bridgeResponse.error ?: "Failed to get usable response from ${targetApp.displayName}."
                                         taskState.finalResponseText = taskState.finalErrorText
                                         taskState.status = TaskStatus.FAILED
                                     }
                                     isDone = true
+                                }
+                            }
+
+                            is LocalPlanResult.MultiStepPlan -> {
+                                if (!planResult.targetApp.isNullOrBlank()) {
+                                    onProgress?.invoke("Opening ${planResult.targetApp}...")
+                                    val launchResult = commandDispatcher.dispatch("launch_app", mapOf("appName" to planResult.targetApp))
+                                    taskState.executedActions.add("launch_app")
+                                    if (!launchResult.success) {
+                                        taskState.finalErrorText = launchResult.error ?: "Could not open ${planResult.targetApp}."
+                                        taskState.finalResponseText = taskState.finalErrorText
+                                        taskState.status = TaskStatus.FAILED
+                                        isDone = true
+                                    } else {
+                                        delay(1200)
+                                        onProgress?.invoke("Observing screen for '${planResult.targetElementText}'...")
+                                        var stepSnap = AccessibilityConnectionManager.takeSnapshot()
+                                        var targetElem = findElementByText(stepSnap, planResult.targetElementText)
+
+                                        if (targetElem == null) {
+                                            onProgress?.invoke("Scrolling to locate '${planResult.targetElementText}'...")
+                                            commandDispatcher.dispatch("scroll_ui", mapOf("direction" to "DOWN"))
+                                            taskState.executedActions.add("scroll_ui")
+                                            delay(800)
+                                            stepSnap = AccessibilityConnectionManager.takeSnapshot()
+                                            targetElem = findElementByText(stepSnap, planResult.targetElementText)
+                                        }
+
+                                        if (targetElem != null) {
+                                            onProgress?.invoke("Selecting '${targetElem.text ?: planResult.targetElementText}'...")
+                                            AccessibilityConnectionManager.performTap(stepSnap.snapshotId, targetElem.id)
+                                            taskState.executedActions.add("tap_element")
+                                            delay(600)
+                                            taskState.finalResponseText = "Opened ${planResult.targetApp} and selected '${targetElem.text ?: planResult.targetElementText}'."
+                                            taskState.status = TaskStatus.SUCCEEDED
+                                        } else {
+                                            taskState.finalErrorText = "Opened ${planResult.targetApp}, but could not find '${planResult.targetElementText}' on screen."
+                                            taskState.finalResponseText = taskState.finalErrorText
+                                            taskState.status = TaskStatus.FAILED
+                                        }
+                                        isDone = true
+                                    }
                                 }
                             }
                         }
@@ -327,11 +371,12 @@ class AgentOrchestrator(
                         // Check if task completed
                         val isSelfTerminating = nextToolName in listOf(
                             "send_whatsapp_message", "get_battery_info", "get_device_info",
-                            "get_storage_info", "get_app_version", "get_accessibility_status", "get_ui_snapshot"
+                            "get_storage_info", "get_app_version", "get_accessibility_status",
+                            "get_ui_snapshot", "get_installed_apps", "get_connectivity_status"
                         )
                         val isMultiStep = trimmed.contains(" and ", ignoreCase = true) || trimmed.contains(" then ", ignoreCase = true)
 
-                        if (isSelfTerminating || (!isMultiStep && currentStep == 1 && nextToolName != "launch_app")) {
+                        if (isSelfTerminating || (!isMultiStep && currentStep == 1)) {
                             taskState.finalResponseText = toolResult.summaryText
                             taskState.status = TaskStatus.SUCCEEDED
                             isDone = true
@@ -501,5 +546,28 @@ class AgentOrchestrator(
         If the goal is finished or you are answering the user, respond with ONLY valid JSON:
         {"thought": "reasoning", "action": "finish", "message": "your final response"}
         """.trimIndent()
+    }
+
+    private fun findElementByText(snapshot: UiSnapshot, queryText: String?): UiElement? {
+        if (queryText.isNullOrBlank()) return null
+        val cleanQuery = queryText.trim().lowercase()
+
+        // 1. Exact or substring match on text / contentDescription
+        val match = snapshot.elements.find { elem ->
+            val text = (elem.text ?: elem.contentDescription ?: "").lowercase()
+            text == cleanQuery || text.contains(cleanQuery)
+        }
+        if (match != null) return match
+
+        // 2. Token match (all words in query exist in element description)
+        val tokens = cleanQuery.split(" ").filter { it.isNotBlank() }
+        if (tokens.size > 1) {
+            return snapshot.elements.find { elem ->
+                val text = (elem.text ?: elem.contentDescription ?: "").lowercase()
+                tokens.all { text.contains(it) }
+            }
+        }
+
+        return null
     }
 }

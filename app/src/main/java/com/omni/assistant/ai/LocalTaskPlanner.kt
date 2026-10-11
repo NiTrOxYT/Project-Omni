@@ -1,10 +1,10 @@
 package com.omni.assistant.ai
 
 import com.omni.assistant.ai.bridge.AiAppBridge
-import com.omni.assistant.ai.bridge.AiBridgeQuery
 import com.omni.assistant.ai.bridge.SupportedAiApp
+import com.omni.assistant.ai.intent.IntentClassifier
+import com.omni.assistant.ai.intent.UserIntent
 import com.omni.assistant.device.AppInventoryProvider
-import com.omni.assistant.execution.CommandDispatcher
 import com.omni.assistant.execution.ToolRegistry
 
 sealed interface LocalPlanResult {
@@ -17,7 +17,8 @@ sealed interface LocalPlanResult {
     data class NeedsAiBridge(
         val prompt: String,
         val targetApp: SupportedAiApp = SupportedAiApp.AUTO,
-        val isDirectQuery: Boolean = false
+        val isDirectQuery: Boolean = false,
+        val isGeneralQuestion: Boolean = false
     ) : LocalPlanResult
 
     data class Ambiguous(
@@ -27,168 +28,123 @@ sealed interface LocalPlanResult {
     data class UserConfirmation(
         val isConfirmed: Boolean
     ) : LocalPlanResult
+
+    data class MultiStepPlan(
+        val targetApp: String?,
+        val stepAction: String,
+        val targetElementText: String?,
+        val rawRequest: String
+    ) : LocalPlanResult
 }
 
 class LocalTaskPlanner(
     private val toolRegistry: ToolRegistry,
     private val appInventoryProvider: AppInventoryProvider,
-    private val aiAppBridge: AiAppBridge
+    private val aiAppBridge: AiAppBridge,
+    private val intentClassifier: IntentClassifier = IntentClassifier(appInventoryProvider)
 ) {
     fun plan(input: String, preferredAiApp: SupportedAiApp = SupportedAiApp.AUTO): LocalPlanResult {
         val trimmed = input.trim()
-        val normalized = trimmed.lowercase()
+        val intent = intentClassifier.classify(trimmed, preferredAiApp)
 
-        // 1. Explicit AI app query checks
-        if (normalized.startsWith("ask chatgpt") || normalized.startsWith("use chatgpt to") || normalized.startsWith("chatgpt:")) {
-            val prompt = trimmed
-                .removePrefix("ask chatgpt")
-                .removePrefix("Ask chatgpt")
-                .removePrefix("use chatgpt to")
-                .removePrefix("chatgpt:")
-                .trim()
-            return LocalPlanResult.NeedsAiBridge(prompt.ifBlank { trimmed }, SupportedAiApp.CHATGPT, isDirectQuery = true)
-        }
+        return when (intent) {
+            is UserIntent.UserConfirmation -> {
+                LocalPlanResult.UserConfirmation(isConfirmed = intent.isConfirmed)
+            }
 
-        if (normalized.startsWith("ask gemini") || normalized.startsWith("use gemini to") || normalized.startsWith("gemini:")) {
-            val prompt = trimmed
-                .removePrefix("ask gemini")
-                .removePrefix("Ask gemini")
-                .removePrefix("use gemini to")
-                .removePrefix("gemini:")
-                .trim()
-            return LocalPlanResult.NeedsAiBridge(prompt.ifBlank { trimmed }, SupportedAiApp.GEMINI, isDirectQuery = true)
-        }
+            is UserIntent.Ambiguous -> {
+                LocalPlanResult.Ambiguous(clarificationMessage = intent.clarificationPrompt)
+            }
 
-        // 2. User Confirmation for Pending Actions
-        if (normalized == "yes" || normalized == "confirm" || normalized == "send" || normalized == "send it" || normalized == "proceed" || normalized == "approve") {
-            return LocalPlanResult.UserConfirmation(isConfirmed = true)
-        }
-        if (normalized == "no" || normalized == "cancel" || normalized == "abort" || normalized == "stop" || normalized == "reject") {
-            return LocalPlanResult.UserConfirmation(isConfirmed = false)
-        }
+            is UserIntent.SensitiveAction -> {
+                LocalPlanResult.DirectToolExecution(
+                    toolName = intent.toolName,
+                    arguments = intent.arguments,
+                    description = intent.description
+                )
+            }
 
-        // 3. Deterministic Battery
-        if (normalized.contains("battery") || normalized.contains("charge") || normalized.contains("power level") || normalized.contains("juice")) {
-            return LocalPlanResult.DirectToolExecution("get_battery_info", emptyMap(), "Checking battery status")
-        }
+            is UserIntent.DeviceQuery -> {
+                LocalPlanResult.DirectToolExecution(
+                    toolName = intent.toolName,
+                    arguments = intent.arguments,
+                    description = intent.description
+                )
+            }
 
-        // 4. Deterministic Storage
-        if (normalized.contains("storage") || normalized.contains("disk") || normalized.contains("free space") || normalized.contains("available memory")) {
-            return LocalPlanResult.DirectToolExecution("get_storage_info", emptyMap(), "Checking storage space")
-        }
-
-        // 5. Deterministic Device Info
-        if (normalized.contains("device info") || normalized.contains("phone info") || normalized.contains("device specs") || normalized.contains("model number") || normalized.contains("os version")) {
-            return LocalPlanResult.DirectToolExecution("get_device_info", emptyMap(), "Retrieving device details")
-        }
-
-        // 6. Deterministic App Version
-        if (normalized.contains("app version") || normalized.contains("version of omni") || normalized.contains("build version")) {
-            return LocalPlanResult.DirectToolExecution("get_app_version", emptyMap(), "Checking Omni version")
-        }
-
-        // 7. Accessibility Service Status
-        if (normalized.contains("accessibility status") || normalized.contains("is accessibility enabled") || normalized.contains("check accessibility")) {
-            return LocalPlanResult.DirectToolExecution("get_accessibility_status", emptyMap(), "Checking accessibility status")
-        }
-
-        // 8. Inspect / Describe Current Screen
-        if (normalized.contains("ui snapshot") || 
-            (normalized.contains("screen") && (normalized.contains("describe") || normalized.contains("inspect") || normalized.contains("view") || normalized.contains("what is on") || normalized.contains("read") || normalized.contains("see")))
-        ) {
-            return LocalPlanResult.DirectToolExecution("get_ui_snapshot", emptyMap(), "Inspecting active screen")
-        }
-
-        // 9. Navigation Back
-        if (normalized == "back" || normalized == "go back" || normalized.contains("navigate back") || normalized.contains("press back")) {
-            return LocalPlanResult.DirectToolExecution("navigate_back", emptyMap(), "Navigating backward")
-        }
-
-        // 10. Scroll Screen
-        if (normalized.contains("scroll down") || normalized.contains("scroll forward") || normalized == "scroll") {
-            return LocalPlanResult.DirectToolExecution("scroll_ui", mapOf("direction" to "DOWN"), "Scrolling down")
-        }
-        if (normalized.contains("scroll up") || normalized.contains("scroll backward")) {
-            return LocalPlanResult.DirectToolExecution("scroll_ui", mapOf("direction" to "UP"), "Scrolling up")
-        }
-
-        // 11. Natural Language Messaging (WhatsApp)
-        val messagingTask = com.omni.assistant.automation.messaging.MessagingCommandParser.parse(trimmed)
-        if (messagingTask != null) {
-            return LocalPlanResult.DirectToolExecution(
-                toolName = "send_whatsapp_message",
-                arguments = mapOf(
-                    "recipient" to messagingTask.recipient,
-                    "message" to messagingTask.messageText
-                ),
-                description = "Processing WhatsApp message to '${messagingTask.recipient}'"
-            )
-        }
-
-        val incompleteRecipient = com.omni.assistant.automation.messaging.MessagingCommandParser.detectIncompleteRecipient(trimmed)
-        if (incompleteRecipient != null) {
-            return LocalPlanResult.Ambiguous(
-                "Please specify what message you would like to send to $incompleteRecipient (e.g. \"Open WhatsApp and text $incompleteRecipient: how are you\")."
-            )
-        }
-
-        // 12. Launch Application
-        if (normalized.startsWith("open ") || normalized.startsWith("launch ") || normalized.startsWith("start ")) {
-            val appQuery = trimmed
-                .removePrefix("open ")
-                .removePrefix("Open ")
-                .removePrefix("launch ")
-                .removePrefix("Launch ")
-                .removePrefix("start ")
-                .removePrefix("Start ")
-                .trim()
-                .removeSuffix(" app")
-                .removeSuffix(" application")
-
-            if (appQuery.isNotBlank()) {
-                return LocalPlanResult.DirectToolExecution(
+            is UserIntent.AppAction -> {
+                LocalPlanResult.DirectToolExecution(
                     toolName = "launch_app",
-                    arguments = mapOf("appName" to appQuery),
-                    description = "Launching $appQuery"
+                    arguments = mapOf("appName" to intent.appName),
+                    description = "Launching ${intent.appName}"
+                )
+            }
+
+            is UserIntent.MultiStepTask -> {
+                LocalPlanResult.MultiStepPlan(
+                    targetApp = intent.targetApp,
+                    stepAction = intent.stepAction,
+                    targetElementText = intent.targetElementText,
+                    rawRequest = intent.rawRequest
+                )
+            }
+
+            is UserIntent.ActionableReasoning -> {
+                LocalPlanResult.NeedsAiBridge(
+                    prompt = intent.prompt,
+                    targetApp = intent.preferredAiApp,
+                    isDirectQuery = false,
+                    isGeneralQuestion = false
+                )
+            }
+
+            is UserIntent.GeneralQuestion -> {
+                LocalPlanResult.NeedsAiBridge(
+                    prompt = intent.question,
+                    targetApp = intent.preferredAiApp,
+                    isDirectQuery = true,
+                    isGeneralQuestion = true
                 )
             }
         }
-
-        // 13. General natural language or complex reasoning -> route to on-device AI app bridge
-        return LocalPlanResult.NeedsAiBridge(trimmed, preferredAiApp)
     }
 
     fun extractTaskCategory(input: String): String {
-        val normalized = input.trim().lowercase()
-        return when {
-            normalized.contains("whatsapp") || normalized.contains("text ") || normalized.contains("message ") -> "MESSAGING_WHATSAPP"
-            normalized.contains("setting") || normalized.contains("bluetooth") || normalized.contains("wifi") || normalized.contains("volume") -> "SETTINGS_CONTROL"
-            normalized.contains("battery") || normalized.contains("storage") || normalized.contains("device info") -> "DEVICE_INSPECTION"
-            normalized.startsWith("open ") || normalized.startsWith("launch ") -> "APP_LAUNCH"
-            else -> "GENERAL_AUTOMATION"
+        return when (val intent = intentClassifier.classify(input.trim())) {
+            is UserIntent.SensitiveAction -> intent.actionType
+            is UserIntent.MultiStepTask -> "MULTI_STEP_TASK"
+            is UserIntent.AppAction -> "APP_LAUNCH"
+            is UserIntent.DeviceQuery -> "DEVICE_INSPECTION"
+            is UserIntent.ActionableReasoning -> "ACTIONABLE_REASONING"
+            is UserIntent.GeneralQuestion -> "GENERAL_QUESTION"
+            is UserIntent.Ambiguous -> "AMBIGUOUS_REQUEST"
+            is UserIntent.UserConfirmation -> "USER_CONFIRMATION"
         }
     }
 
     fun extractIntendedOutcome(input: String): String {
-        val normalized = input.trim().lowercase()
-        return when {
-            normalized.contains("whatsapp") || normalized.contains("text ") || normalized.contains("message ") -> "SEND_WHATSAPP_MESSAGE"
-            normalized.contains("setting") -> "ADJUST_SETTING"
-            normalized.contains("battery") -> "CHECK_BATTERY"
-            normalized.contains("storage") -> "CHECK_STORAGE"
-            normalized.contains("device info") -> "CHECK_DEVICE_INFO"
-            normalized.startsWith("open ") || normalized.startsWith("launch ") -> "LAUNCH_APP"
-            else -> "EXECUTE_USER_INTENT"
+        return when (val intent = intentClassifier.classify(input.trim())) {
+            is UserIntent.SensitiveAction -> "SEND_WHATSAPP_MESSAGE"
+            is UserIntent.MultiStepTask -> "EXECUTE_MULTI_STEP_${intent.targetApp?.uppercase() ?: "AUTOMATION"}"
+            is UserIntent.AppAction -> "LAUNCH_${intent.appName.uppercase()}"
+            is UserIntent.DeviceQuery -> intent.toolName.uppercase()
+            is UserIntent.ActionableReasoning -> "REASON_AND_EXECUTE"
+            is UserIntent.GeneralQuestion -> "ANSWER_QUESTION"
+            is UserIntent.Ambiguous -> "REQUEST_CLARIFICATION"
+            is UserIntent.UserConfirmation -> "PROCESS_CONFIRMATION"
         }
     }
 
     fun extractGeneralizedInitialState(input: String, currentPackage: String?): String {
-        val normalized = input.trim().lowercase()
-        return when {
-            normalized.contains("whatsapp") || normalized.contains("text ") || normalized.contains("message ") -> "pkg:com.whatsapp|screen:CHAT_LIST"
-            normalized.contains("setting") -> "pkg:com.android.settings|screen:SETTINGS_MAIN"
-            currentPackage != null -> "pkg:$currentPackage"
-            else -> "pkg:unknown"
+        val intent = intentClassifier.classify(input.trim())
+        return when (intent) {
+            is UserIntent.SensitiveAction -> "pkg:com.whatsapp|screen:CHAT_LIST"
+            is UserIntent.MultiStepTask -> "pkg:${intent.targetApp?.lowercase() ?: "app"}|screen:INITIAL"
+            is UserIntent.AppAction -> "pkg:${intent.appName.lowercase()}|screen:LAUNCH"
+            is UserIntent.DeviceQuery -> "pkg:system|device:${intent.toolName}"
+            is UserIntent.ActionableReasoning -> "pkg:omni|action:reasoning"
+            is UserIntent.GeneralQuestion -> "pkg:omni|query:question"
+            else -> if (currentPackage != null) "pkg:$currentPackage" else "pkg:unknown"
         }
     }
 }

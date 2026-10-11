@@ -34,6 +34,8 @@ import com.omni.assistant.execution.tools.GetBatteryInfoTool
 import com.omni.assistant.execution.tools.GetDeviceInfoTool
 import com.omni.assistant.execution.tools.GetStorageInfoTool
 import com.omni.assistant.execution.tools.GetUiSnapshotTool
+import com.omni.assistant.execution.tools.GetConnectivityStatusTool
+import com.omni.assistant.execution.tools.GetInstalledAppsTool
 import com.omni.assistant.execution.tools.LaunchAppTool
 import com.omni.assistant.execution.tools.NavigateBackTool
 import com.omni.assistant.execution.tools.ScrollUiTool
@@ -100,6 +102,8 @@ class OmniAppContainer(private val application: Application) {
             register(GetBatteryInfoTool(batteryInfoProvider))
             register(GetAppVersionTool(deviceInfoProvider))
             register(GetAccessibilityStatusTool(application))
+            register(GetInstalledAppsTool(appInventoryProvider))
+            register(GetConnectivityStatusTool(application))
             register(GetUiSnapshotTool())
             register(LaunchAppTool(application, appInventoryProvider))
             register(TapElementTool())
