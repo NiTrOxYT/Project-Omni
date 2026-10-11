@@ -7,6 +7,8 @@ import com.omni.assistant.accessibility.UiElement
 import com.omni.assistant.accessibility.UiSnapshot
 import com.omni.assistant.core.logging.OmniLogger
 import kotlinx.coroutines.delay
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.ensureActive
 
 open class AiAppBridge(
     private val context: Context? = null
@@ -17,7 +19,7 @@ open class AiAppBridge(
         const val CHATGPT_PACKAGE = "com.openai.chatgpt"
         const val GEMINI_PACKAGE = "com.google.android.apps.bard"
         const val GOOGLE_APP_PACKAGE = "com.google.android.googlequicksearchbox"
-        const val MAX_POLL_DURATION_MS = 25_000L
+        const val MAX_POLL_DURATION_MS = 28_000L
         const val POLL_INTERVAL_MS = 800L
     }
 
@@ -109,7 +111,7 @@ open class AiAppBridge(
             )
         }
 
-        context.startActivity(launchIntent)
+        context?.startActivity(launchIntent)
 
         // Wait for AI app window to become active in Accessibility
         var isAppForeground = false
@@ -117,9 +119,11 @@ open class AiAppBridge(
         val launchStart = System.currentTimeMillis()
 
         while (System.currentTimeMillis() - launchStart < maxWaitLaunch) {
+            coroutineContext.ensureActive()
             delay(500)
             val snapshot = AccessibilityConnectionManager.takeSnapshot()
-            if (snapshot.packageName == targetPackage || (snapshot.packageName ?: "").contains(targetPackage.substringAfterLast('.'))) {
+            val currentPkg = snapshot.packageName ?: ""
+            if (currentPkg == targetPackage || currentPkg.contains(targetPackage.substringAfterLast('.'))) {
                 isAppForeground = true
                 break
             }
@@ -130,14 +134,55 @@ open class AiAppBridge(
         }
 
         onProgress?.invoke("Waiting for $appDisplayName interface...")
-        delay(1000)
 
         var snapshot = AccessibilityConnectionManager.takeSnapshot()
+        var inputElement: UiElement? = null
+        val findInputStart = System.currentTimeMillis()
+        val maxFindInputDuration = 8_000L
 
-        // Find input text field
-        val inputElement = findPromptInputField(snapshot)
+        while (System.currentTimeMillis() - findInputStart < maxFindInputDuration) {
+            coroutineContext.ensureActive()
+            snapshot = AccessibilityConnectionManager.takeSnapshot()
+
+            OmniLogger.d(tag, "Polling $appDisplayName for input: elements=${snapshot.elements.size}, pkg=${snapshot.packageName}")
+
+            // Check if navigation drawer is open (e.g. "Chat" button with pencil icon)
+            val drawerChatButton = snapshot.elements.find { elem ->
+                val text = (elem.text ?: elem.contentDescription ?: "").lowercase()
+                (text == "chat" || text == "new chat") && elem.isClickable && elem.bounds.bottom > 2000
+            }
+            if (drawerChatButton != null && snapshot.elements.none { it.isEditable }) {
+                OmniLogger.i(tag, "Drawer or new chat button detected in $appDisplayName. Tapping to open chat.")
+                AccessibilityConnectionManager.performTap(snapshot.snapshotId, drawerChatButton.id)
+                delay(800)
+                snapshot = AccessibilityConnectionManager.takeSnapshot()
+            }
+
+            val candidate = findPromptInputField(snapshot)
+            if (candidate != null) {
+                if (!candidate.isEditable && !candidate.className.contains("EditText", ignoreCase = true)) {
+                    // Tap placeholder view (e.g. "+ Ask ChatGPT") to activate the real EditText
+                    OmniLogger.i(tag, "Tapping placeholder input field '${candidate.text ?: candidate.contentDescription}' to activate editor.")
+                    AccessibilityConnectionManager.performTap(snapshot.snapshotId, candidate.id)
+                    delay(600)
+                    snapshot = AccessibilityConnectionManager.takeSnapshot()
+                    inputElement = findPromptInputField(snapshot) ?: candidate
+                } else {
+                    inputElement = candidate
+                }
+
+                if (inputElement != null) {
+                    break
+                }
+            }
+            delay(500)
+        }
+
         if (inputElement == null) {
-            OmniLogger.w(tag, "Could not locate prompt input field in $appDisplayName snapshot.")
+            OmniLogger.w(tag, "Could not locate prompt input field in $appDisplayName snapshot. Total elements: ${snapshot.elements.size}")
+            snapshot.elements.take(20).forEach {
+                OmniLogger.w(tag, "  -> [${it.id}] ${it.className} text='${it.text}' desc='${it.contentDescription}' edit=${it.isEditable} click=${it.isClickable} bounds=${it.bounds.toCompactString()}")
+            }
             return AiBridgeResponse(
                 success = false,
                 prompt = query.prompt,
@@ -164,7 +209,7 @@ open class AiAppBridge(
             )
         }
 
-        delay(400)
+        delay(500)
         snapshot = enterResult.freshSnapshot ?: AccessibilityConnectionManager.takeSnapshot()
 
         // Find and tap send button
@@ -185,15 +230,18 @@ open class AiAppBridge(
         val pollStart = System.currentTimeMillis()
 
         while (System.currentTimeMillis() - pollStart < MAX_POLL_DURATION_MS) {
+            coroutineContext.ensureActive()
             delay(POLL_INTERVAL_MS)
             val freshSnap = AccessibilityConnectionManager.takeSnapshot()
 
+            val isGenerating = isStillGenerating(freshSnap)
             val extracted = extractAiResponseText(freshSnap, query.prompt, targetPackage)
+
             if (!extracted.isNullOrBlank()) {
-                if (extracted == lastCandidateText) {
+                if (extracted == lastCandidateText && !isGenerating) {
                     stableCount++
                     // If text remained stable for 2 polls (~1.6s) and is non-empty, generation is finished
-                    if (stableCount >= 2 && extracted.length > 15) {
+                    if (stableCount >= 2 && extracted.length > 10) {
                         latestExtractedText = extracted
                         break
                     }
@@ -209,11 +257,11 @@ open class AiAppBridge(
         // Return to caller app if requested
         if (!query.returnToPackage.isNullOrBlank() && query.returnToPackage != targetPackage) {
             onProgress?.invoke("Returning to Omni...")
-            val returnIntent = pm.getLaunchIntentForPackage(query.returnToPackage)?.apply {
+            val returnIntent = pm?.getLaunchIntentForPackage(query.returnToPackage)?.apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             if (returnIntent != null) {
-                context.startActivity(returnIntent)
+                context?.startActivity(returnIntent)
             } else {
                 AccessibilityConnectionManager.performNavigateBack()
             }
@@ -236,65 +284,109 @@ open class AiAppBridge(
                 prompt = query.prompt,
                 responseText = null,
                 appUsed = appDisplayName,
-                error = "Timed out waiting for response from $appDisplayName.",
+                error = "Timed out waiting for response from $appDisplayName. Ensure the app is signed in and has internet access.",
                 executionTimeMs = totalTime
             )
         }
     }
 
     private fun findPromptInputField(snapshot: UiSnapshot): UiElement? {
-        val editables = snapshot.elements.filter { it.isEditable }
+        val editables = snapshot.elements.filter {
+            it.isEditable || it.className.contains("EditText", ignoreCase = true)
+        }
         if (editables.size == 1) return editables.first()
 
-        val promptKeywords = listOf("message", "ask", "prompt", "type", "search", "anything", "chatgpt", "gemini")
+        val promptKeywords = listOf("message", "ask", "prompt", "type", "search", "anything", "chatgpt", "gemini", "write", "reply")
         val match = editables.find { elem ->
-            val text = (elem.text ?: elem.contentDescription ?: "").lowercase()
-            promptKeywords.any { text.contains(it) }
+            val desc = (elem.text ?: elem.contentDescription ?: "").lowercase()
+            promptKeywords.any { desc.contains(it) }
         }
         if (match != null) return match
 
-        // Return the lowest editable on screen (chat input is typically at bottom)
-        return editables.maxByOrNull { it.bounds.bottom }
+        if (editables.isNotEmpty()) {
+            return editables.maxByOrNull { it.bounds.bottom }
+        }
+
+        // Fallback 1: search for placeholder views (e.g. "+ Ask ChatGPT", "Message", "Write anything", "Reply to ChatGPT")
+        val placeholder = snapshot.elements.find { elem ->
+            val desc = (elem.text ?: elem.contentDescription ?: "").lowercase()
+            (elem.isClickable || elem.className.contains("TextView") || elem.className.contains("View")) &&
+                    promptKeywords.any { desc.contains(it) } &&
+                    elem.bounds.bottom > 1200
+        }
+        if (placeholder != null) return placeholder
+
+        // Fallback 2: In chat apps, the lowest wide clickable view is the prompt bar container
+        return snapshot.elements.filter {
+            it.isClickable && (it.bounds.right - it.bounds.left > 600) && it.bounds.bottom > 1000
+        }.maxByOrNull { it.bounds.bottom }
     }
 
     private fun findSendButton(snapshot: UiSnapshot, inputField: UiElement): UiElement? {
-        val sendKeywords = listOf("send", "submit", "arrow", "post", "enter", "mic")
+        val sendKeywords = listOf("send message", "send prompt", "send query", "send", "submit", "arrow", "post", "enter", "up")
+        // 1. Check by content description or text (Compose icon nodes often have clickable=false, but performTap handles parent/gestures)
         val candidate = snapshot.elements.find { elem ->
-            if (!elem.isClickable) return@find false
-            val text = (elem.text ?: elem.contentDescription ?: "").lowercase()
-            sendKeywords.any { text.contains(it) }
+            val desc = (elem.contentDescription ?: elem.text ?: "").lowercase()
+            sendKeywords.any { desc.contains(it) } &&
+                    !desc.contains("voice") && !desc.contains("recording") && !desc.contains("dictation")
         }
         if (candidate != null) return candidate
 
-        // Search for clickable button horizontally adjacent to input field
-        return snapshot.elements.find { elem ->
+        // 2. Search for clickable button horizontally adjacent to input field in bottom region
+        val adjacent = snapshot.elements.filter { elem ->
             elem.isClickable && elem.id != inputField.id &&
-                    elem.bounds.top >= inputField.bounds.top - 50 &&
-                    elem.bounds.bottom <= inputField.bounds.bottom + 50 &&
-                    elem.bounds.left >= inputField.bounds.left
+                    elem.bounds.top >= inputField.bounds.top - 150 &&
+                    elem.bounds.bottom <= inputField.bounds.bottom + 150 &&
+                    elem.bounds.left >= inputField.bounds.left &&
+                    !(elem.contentDescription ?: "").lowercase().let { it.contains("dictation") || it.contains("voice") || it.contains("record") }
+        }.maxByOrNull { it.bounds.left }
+        if (adjacent != null) return adjacent
+
+        // 3. Fallback: rightmost clickable button in bottom right corner (x > 850, bottom > 1000), excluding voice/dictation
+        return snapshot.elements.filter { elem ->
+            elem.isClickable && elem.id != inputField.id && elem.bounds.left > 850 && elem.bounds.bottom > 1000 &&
+                    !(elem.contentDescription ?: "").lowercase().let { it.contains("dictation") || it.contains("voice") || it.contains("record") }
+        }.maxByOrNull { it.bounds.left }
+    }
+
+    private fun isStillGenerating(snapshot: UiSnapshot): Boolean {
+        return snapshot.elements.any { elem ->
+            val desc = (elem.text ?: elem.contentDescription ?: "").lowercase()
+            desc.contains("stop generating") || desc.contains("stop response") || desc == "stop"
         }
     }
 
     private fun extractAiResponseText(snapshot: UiSnapshot, prompt: String, targetPackage: String): String? {
         val promptClean = prompt.trim().lowercase()
+        val ignoredTerms = listOf(
+            "chatgpt", "gemini", "openai", "google", "message", "ask gemini", "send", "submit",
+            "copy", "share", "read aloud", "good response", "bad response", "regenerate", "edit",
+            "more options", "new chat", "attach", "drawer", "menu", "navigate up", "back",
+            "[protected]", "create an image", "write or edit", "reply to chatgpt", "ask chatgpt",
+            "cancel recording", "stop recording", "tap to send recording", "dictation"
+        )
 
         // Candidate response elements: text-bearing views that do not match the prompt or system navigation labels
         val textElements = snapshot.elements.filter { elem ->
             val t = elem.text?.trim() ?: ""
-            t.isNotBlank() &&
-                    t != "[PROTECTED]" &&
-                    !t.lowercase().contains(promptClean) &&
-                    !t.equals("ChatGPT", ignoreCase = true) &&
-                    !t.equals("Gemini", ignoreCase = true) &&
-                    !t.equals("Message", ignoreCase = true) &&
-                    !t.equals("Send", ignoreCase = true) &&
-                    t.length > 5
+            if (t.length < 3) return@filter false
+            val tLower = t.lowercase()
+
+            // Exclude exact match with user prompt
+            if (tLower == promptClean) return@filter false
+            // Exclude editable input field still containing text
+            if (elem.isEditable && tLower.contains(promptClean)) return@filter false
+            // Exclude system controls
+            if (ignoredTerms.any { tLower == it || tLower.startsWith("$it ") || tLower.endsWith(" $it") }) return@filter false
+            true
         }
 
         if (textElements.isEmpty()) return null
 
-        // In chat apps, the latest response is usually near the bottom above the input bar
-        val longestOrLatest = textElements.maxByOrNull { it.text?.length ?: 0 }
-        return longestOrLatest?.text
+        // In chat apps, the latest response is usually the longest or bottom-most text bubble above the input box
+        val sortedByPosition = textElements.sortedByDescending { it.bounds.bottom }
+        val latest = sortedByPosition.firstOrNull() ?: textElements.maxByOrNull { it.text?.length ?: 0 }
+
+        return latest?.text
     }
 }

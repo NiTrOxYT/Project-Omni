@@ -1,5 +1,6 @@
 package com.omni.assistant.presentation.chat
 
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -18,6 +19,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -29,10 +32,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Person
@@ -58,7 +63,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
@@ -292,6 +300,8 @@ fun ChatMessageBubble(message: ChatMessage) {
     val bubbleColor = if (isUser) SurfaceVariantDark else SurfaceDark
     val bubbleBorder = if (isUser) BorderHighlightDark else BorderDark
     val textColor = if (message.isError) StatusError else TextPrimaryDark
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
 
     val timeFormatted = remember(message.timestamp) {
         SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(message.timestamp))
@@ -335,18 +345,39 @@ fun ChatMessageBubble(message: ChatMessage) {
                 border = androidx.compose.foundation.BorderStroke(1.dp, bubbleBorder)
             ) {
                 Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                    Text(
-                        text = message.content,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = textColor
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = timeFormatted,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = TextTertiaryDark,
-                        modifier = Modifier.align(Alignment.End)
-                    )
+                    SelectionContainer {
+                        Text(
+                            text = message.content,
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = textColor
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = {
+                                clipboardManager.setText(AnnotatedString(message.content))
+                                Toast.makeText(context, "Copied to clipboard", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.size(22.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ContentCopy,
+                                contentDescription = "Copy message",
+                                tint = TextTertiaryDark,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                        Text(
+                            text = timeFormatted,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextTertiaryDark
+                        )
+                    }
                 }
             }
 
@@ -435,7 +466,10 @@ fun ChatInputBar(
     onSend: () -> Unit
 ) {
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .imePadding(),
         color = SurfaceDark,
         border = androidx.compose.foundation.BorderStroke(1.dp, BorderDark)
     ) {

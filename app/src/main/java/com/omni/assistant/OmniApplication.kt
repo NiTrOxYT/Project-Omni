@@ -78,6 +78,21 @@ class OmniAppContainer(private val application: Application) {
         AppInventoryProvider(application)
     }
 
+    val experienceRepository: com.omni.assistant.domain.repository.ExperienceRepository by lazy {
+        com.omni.assistant.data.repository.ExperienceRepositoryImpl(database.experienceDao())
+    }
+
+    val snapshotLifecycleManager: com.omni.assistant.accessibility.lifecycle.SnapshotLifecycleManager by lazy {
+        com.omni.assistant.accessibility.lifecycle.SnapshotLifecycleManager(application)
+    }
+
+    val whatsAppAutomationAdapter: com.omni.assistant.automation.whatsapp.WhatsAppAutomationAdapter by lazy {
+        com.omni.assistant.automation.whatsapp.WhatsAppAutomationAdapter(
+            context = application,
+            experienceRepository = experienceRepository
+        )
+    }
+
     val toolRegistry: ToolRegistry by lazy {
         ToolRegistry().apply {
             register(GetDeviceInfoTool(deviceInfoProvider))
@@ -91,6 +106,7 @@ class OmniAppContainer(private val application: Application) {
             register(EnterTextTool())
             register(ScrollUiTool())
             register(NavigateBackTool())
+            register(com.omni.assistant.execution.tools.SendWhatsAppMessageTool(whatsAppAutomationAdapter))
         }
     }
 
@@ -129,7 +145,9 @@ class OmniAppContainer(private val application: Application) {
             actionPolicy = actionPolicy,
             commandDispatcher = commandDispatcher,
             chatRepository = chatRepository,
-            taskRepository = taskRepository
+            taskRepository = taskRepository,
+            experienceRepository = experienceRepository,
+            snapshotLifecycleManager = snapshotLifecycleManager
         )
     }
 
@@ -166,5 +184,7 @@ class OmniApplication : Application() {
         super.onCreate()
         OmniLogger.i("OmniApp", "Initializing Omni Application (Phase 2 - Agent Intelligence)")
         container = OmniAppContainer(this)
+        // Cleanup stale task workspaces left from any prior interrupted process
+        container.snapshotLifecycleManager.cleanupStaleWorkspaces()
     }
 }

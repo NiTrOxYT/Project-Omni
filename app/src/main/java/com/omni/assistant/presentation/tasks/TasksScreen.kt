@@ -190,6 +190,7 @@ fun TaskDetailCard(task: TaskItem) {
     val statusColors = when (task.status) {
         TaskStatus.SUCCEEDED -> Pair(StatusSuccess, StatusSuccessContainer)
         TaskStatus.RUNNING -> Pair(AccentCyan, AccentCyan.copy(alpha = 0.2f))
+        TaskStatus.AWAITING_CONFIRMATION -> Pair(StatusWarning, StatusWarningContainer)
         TaskStatus.PENDING -> Pair(StatusWarning, StatusWarningContainer)
         TaskStatus.FAILED -> Pair(StatusError, StatusErrorContainer)
         TaskStatus.CANCELLED -> Pair(TextTertiaryDark, SurfaceVariantDark)
@@ -198,6 +199,7 @@ fun TaskDetailCard(task: TaskItem) {
     val statusIcon = when (task.status) {
         TaskStatus.SUCCEEDED -> Icons.Default.CheckCircle
         TaskStatus.RUNNING -> Icons.Default.Sync
+        TaskStatus.AWAITING_CONFIRMATION -> Icons.Default.HourglassTop
         TaskStatus.PENDING -> Icons.Default.HourglassTop
         TaskStatus.FAILED, TaskStatus.CANCELLED -> Icons.Default.ErrorOutline
     }

@@ -5,21 +5,25 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import com.omni.assistant.data.local.dao.ChatMessageDao
+import com.omni.assistant.data.local.dao.ExperienceDao
 import com.omni.assistant.data.local.dao.TaskDao
 import com.omni.assistant.data.local.entity.ChatMessageEntity
+import com.omni.assistant.data.local.entity.ExperienceRecordEntity
 import com.omni.assistant.data.local.entity.TaskEntity
 
 @Database(
     entities = [
         ChatMessageEntity::class,
-        TaskEntity::class
+        TaskEntity::class,
+        ExperienceRecordEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class OmniDatabase : RoomDatabase() {
     abstract fun chatMessageDao(): ChatMessageDao
     abstract fun taskDao(): TaskDao
+    abstract fun experienceDao(): ExperienceDao
 
     companion object {
         private const val DATABASE_NAME = "omni_assistant.db"

@@ -1,8 +1,10 @@
 package com.omni.assistant.accessibility
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.content.Intent
+import android.graphics.Path
 import android.graphics.Rect
 import android.os.Bundle
 import android.provider.Settings
@@ -75,6 +77,23 @@ object AccessibilityConnectionManager {
 
     private fun getActiveRoot(): AccessibilityNodeInfo? {
         val service = serviceRef?.get() ?: return null
+        try {
+            val windows = service.windows
+            if (!windows.isNullOrEmpty()) {
+                val appWindows = windows.filter { 
+                    it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION 
+                }
+                val targetWindow = appWindows.find { it.isActive }
+                    ?: appWindows.find { it.isFocused }
+                    ?: appWindows.firstOrNull()
+                val windowRoot = targetWindow?.root
+                if (windowRoot != null) {
+                    return windowRoot
+                }
+            }
+        } catch (e: Exception) {
+            OmniLogger.w(TAG, "Error inspecting service.windows: ${e.message}")
+        }
         return try {
             service.rootInActiveWindow
         } catch (e: Exception) {
@@ -91,6 +110,11 @@ object AccessibilityConnectionManager {
         } catch (_: Exception) {}
         lastSnapshot = snapshot
         return snapshot
+    }
+
+    fun clearSnapshots() {
+        lastSnapshot = null
+        OmniLogger.d(TAG, "Transient UI snapshots and element caches cleared.")
     }
 
     suspend fun performTap(snapshotId: String, elementId: String): AutomationActionResult {
@@ -139,7 +163,7 @@ object AccessibilityConnectionManager {
             )
         }
 
-        val clickAccepted = if (nodeToClick.isClickable) {
+        var clickAccepted = if (nodeToClick.isClickable) {
             nodeToClick.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         } else {
             // Find clickable parent if child wasn't marked clickable
@@ -164,6 +188,19 @@ object AccessibilityConnectionManager {
 
         try { nodeToClick.recycle() } catch (_: Exception) {}
         try { root.recycle() } catch (_: Exception) {}
+
+        if (!clickAccepted) {
+            // Fallback to gesture tap at element center if accessibility click action is rejected
+            val service = serviceRef?.get()
+            if (service != null && targetElement.bounds.right > targetElement.bounds.left && targetElement.bounds.bottom > targetElement.bounds.top) {
+                val cx = (targetElement.bounds.left + targetElement.bounds.right) / 2f
+                val cy = (targetElement.bounds.top + targetElement.bounds.bottom) / 2f
+                val path = Path().apply { moveTo(cx, cy) }
+                val stroke = GestureDescription.StrokeDescription(path, 0, 100)
+                val gesture = GestureDescription.Builder().addStroke(stroke).build()
+                clickAccepted = service.dispatchGesture(gesture, null, null)
+            }
+        }
 
         if (!clickAccepted) {
             return AutomationActionResult(
@@ -244,7 +281,12 @@ object AccessibilityConnectionManager {
         val arguments = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
-        val textAccepted = nodeToEdit.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+        var textAccepted = nodeToEdit.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+        if (!textAccepted) {
+            nodeToEdit.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            delay(200)
+            textAccepted = nodeToEdit.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+        }
 
         try { nodeToEdit.recycle() } catch (_: Exception) {}
         try { root.recycle() } catch (_: Exception) {}
@@ -381,10 +423,11 @@ object AccessibilityConnectionManager {
 
             val textMatches = (node.text?.toString() ?: "") == (target.text ?: "")
             val descMatches = (node.contentDescription?.toString() ?: "") == (target.contentDescription ?: "")
+            val resIdMatches = !target.resourceId.isNullOrBlank() && (node.viewIdResourceName ?: "") == target.resourceId
             val classMatches = (node.className?.toString() ?: "").endsWith(target.className.substringAfterLast('.'))
             val boundsMatch = nodeRect == targetRect
 
-            if (boundsMatch && (textMatches || descMatches || classMatches)) {
+            if (boundsMatch && (textMatches || descMatches || resIdMatches || classMatches)) {
                 return AccessibilityNodeInfo.obtain(node)
             }
 

@@ -21,6 +21,7 @@ class SettingsRepositoryImpl(
         private const val PREFS_NAME = "omni_settings"
         private const val KEY_THEME = "key_app_theme"
         private const val KEY_PREFERRED_AI = "key_preferred_ai_app"
+        private const val KEY_MESSAGING_AUTO_SEND = "key_messaging_auto_send"
     }
 
     override fun getThemeMode(): Flow<AppThemeMode> = callbackFlow {
@@ -57,6 +58,28 @@ class SettingsRepositoryImpl(
 
     override suspend fun setPreferredAiApp(app: com.omni.assistant.ai.bridge.SupportedAiApp) {
         prefs.edit().putString(KEY_PREFERRED_AI, app.name).apply()
+    }
+
+    override fun isMessagingAutoSendEnabled(): Flow<Boolean> = callbackFlow {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == KEY_MESSAGING_AUTO_SEND) {
+                trySend(readCurrentMessagingAutoSend())
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        trySend(readCurrentMessagingAutoSend())
+
+        awaitClose {
+            prefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
+    }.distinctUntilChanged()
+
+    override suspend fun setMessagingAutoSendEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_MESSAGING_AUTO_SEND, enabled).apply()
+    }
+
+    private fun readCurrentMessagingAutoSend(): Boolean {
+        return prefs.getBoolean(KEY_MESSAGING_AUTO_SEND, false)
     }
 
     private fun readCurrentTheme(): AppThemeMode {

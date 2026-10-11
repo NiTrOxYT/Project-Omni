@@ -1,30 +1,32 @@
 package com.omni.assistant.ai.orchestrator
 
-import com.omni.assistant.ai.AiMessage
+import com.omni.assistant.accessibility.AccessibilityConnectionManager
+import com.omni.assistant.accessibility.lifecycle.SnapshotLifecycleManager
+import com.omni.assistant.accessibility.observation.ObservationClassifier
+import com.omni.assistant.accessibility.observation.ScreenObservation
 import com.omni.assistant.ai.AiProvider
-import com.omni.assistant.ai.AiRequest
-import com.omni.assistant.ai.AiRole
-import com.omni.assistant.ai.AiToolResult
-import com.omni.assistant.ai.LocalCommandProcessor
-import com.omni.assistant.ai.config.AiConfigRepository
-import com.omni.assistant.core.logging.OmniLogger
-import com.omni.assistant.domain.model.ChatMessage
-import com.omni.assistant.domain.model.MessageSender
-import com.omni.assistant.domain.model.TaskItem
-import com.omni.assistant.domain.model.TaskStatus
-import com.omni.assistant.domain.repository.ChatRepository
-import com.omni.assistant.domain.repository.TaskRepository
-import com.omni.assistant.execution.CommandDispatcher
-import com.omni.assistant.execution.ToolRegistry
-import com.omni.assistant.security.ActionPolicy
-import com.omni.assistant.security.PolicyDecision
 import com.omni.assistant.ai.LocalPlanResult
 import com.omni.assistant.ai.LocalTaskPlanner
 import com.omni.assistant.ai.bridge.AiAppBridge
 import com.omni.assistant.ai.bridge.AiBridgeQuery
 import com.omni.assistant.ai.bridge.SupportedAiApp
+import com.omni.assistant.ai.config.AiConfigRepository
+import com.omni.assistant.core.logging.OmniLogger
+import com.omni.assistant.domain.model.ChatMessage
+import com.omni.assistant.domain.model.ExperienceOutcome
+import com.omni.assistant.domain.model.ExperienceRecord
+import com.omni.assistant.domain.model.MessageSender
+import com.omni.assistant.domain.model.TaskItem
+import com.omni.assistant.domain.model.TaskStatus
+import com.omni.assistant.domain.repository.ChatRepository
+import com.omni.assistant.domain.repository.ExperienceRepository
 import com.omni.assistant.domain.repository.SettingsRepository
+import com.omni.assistant.domain.repository.TaskRepository
+import com.omni.assistant.execution.CommandDispatcher
+import com.omni.assistant.execution.ToolRegistry
+import com.omni.assistant.security.ActionPolicy
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.withTimeout
@@ -58,12 +60,14 @@ class AgentOrchestrator(
     private val actionPolicy: ActionPolicy,
     private val commandDispatcher: CommandDispatcher,
     private val chatRepository: ChatRepository,
-    private val taskRepository: TaskRepository
+    private val taskRepository: TaskRepository,
+    private val experienceRepository: ExperienceRepository,
+    private val snapshotLifecycleManager: SnapshotLifecycleManager
 ) {
     private val tag = "AgentOrchestrator"
 
     companion object {
-        const val MAX_CONTEXT_MESSAGES = 12
+        const val MAX_EXECUTION_STEPS = 8
         const val EXECUTION_TIMEOUT_MS = 60_000L
     }
 
@@ -97,306 +101,271 @@ class AgentOrchestrator(
         taskRepository.insertTask(initialTask)
         taskRepository.updateTaskStatus(taskId, TaskStatus.RUNNING)
 
+        // Create temporary task-scoped workspace on disk
+        snapshotLifecycleManager.getTaskWorkspace(taskId)
+
+        val taskCategory = localTaskPlanner.extractTaskCategory(trimmed)
+        val intendedOutcome = localTaskPlanner.extractIntendedOutcome(trimmed)
+        val taskState = AgentTaskState(
+            taskId = taskId,
+            originalRequest = trimmed,
+            intendedOutcome = intendedOutcome
+        )
+
         try {
             return withTimeout(EXECUTION_TIMEOUT_MS) {
                 val preferredAiApp = settingsRepository.getPreferredAiApp().firstOrNull() ?: SupportedAiApp.AUTO
 
-                // 3. Local Task Planner Execution (Zero API Key required)
-                val planResult = localTaskPlanner.plan(trimmed, preferredAiApp)
+                // UNDERSTAND & RECALL
+                onProgress?.invoke("Understanding request & recalling experience...")
+                val initialSnapshot = AccessibilityConnectionManager.takeSnapshot()
+                val initialObservation = ObservationClassifier.classify(initialSnapshot)
+                taskState.lastObservedSummary = initialObservation.compactSummary
+                taskState.observedStateTransitions.add(initialObservation.toStateKey())
 
-                when (planResult) {
-                    is LocalPlanResult.DirectToolExecution -> {
-                        OmniLogger.i(tag, "Executing via direct local tool path: ${planResult.toolName}")
-                        onProgress?.invoke(planResult.description)
-
-                        val toolResult = commandDispatcher.dispatch(planResult.toolName, planResult.arguments)
-                        val completionTime = System.currentTimeMillis()
-                        val isSuccess = toolResult.success
-                        val finalStatus = if (isSuccess) TaskStatus.SUCCEEDED else TaskStatus.FAILED
-
-                        taskRepository.updateTaskStatus(
-                            taskId = taskId,
-                            status = finalStatus,
-                            completedAt = completionTime,
-                            resultSummary = toolResult.summaryText,
-                            errorDetails = toolResult.error
-                        )
-
-                        val assistantMessage = ChatMessage(
-                            id = UUID.randomUUID().toString(),
-                            sender = MessageSender.ASSISTANT,
-                            content = toolResult.summaryText,
-                            timestamp = completionTime,
-                            taskId = taskId,
-                            isError = !isSuccess
-                        )
-                        chatRepository.insertMessage(assistantMessage)
-
-                        return@withTimeout if (isSuccess) {
-                            AgentExecutionResult.Success(
-                                taskId = taskId,
-                                userMessage = userMessage,
-                                assistantMessage = assistantMessage,
-                                executedTools = listOf(planResult.toolName)
-                            )
-                        } else {
-                            AgentExecutionResult.Failure(
-                                taskId = taskId,
-                                userMessage = userMessage,
-                                assistantMessage = assistantMessage,
-                                errorMessage = toolResult.error ?: "Tool execution failed"
-                            )
-                        }
-                    }
-
-                    is LocalPlanResult.NeedsAiBridge -> {
-                        val config = aiConfigRepository.getCurrentConfig()
-
-                        // If user explicitly configured and requested Legacy Cloud Gemini, use cloud loop
-                        if (config.useCloudAi && config.hasValidApiKey) {
-                            OmniLogger.i(tag, "Using explicitly configured legacy cloud AI provider")
-                            // Falls through to Cloud AI loop below
-                        } else {
-                            // Default: On-device AI App Bridge (ChatGPT / Gemini app)
-                            OmniLogger.i(tag, "Delegating to on-device AI App Bridge: ${planResult.targetApp}")
-                            onProgress?.invoke("Delegating to installed AI app...")
-
-                            val bridgeResponse = aiAppBridge.askInstalledAiApp(
-                                query = AiBridgeQuery(
-                                    prompt = planResult.prompt,
-                                    targetApp = planResult.targetApp,
-                                    returnToPackage = "com.omni.assistant.debug"
-                                ),
-                                onProgress = onProgress
-                            )
-
-                            val completionTime = System.currentTimeMillis()
-                            val isSuccess = bridgeResponse.success
-                            val responseText = if (isSuccess) {
-                                "[${bridgeResponse.appUsed}]\n${bridgeResponse.responseText}"
-                            } else {
-                                bridgeResponse.error ?: "Failed to receive response from AI application."
-                            }
-
-                            taskRepository.updateTaskStatus(
-                                taskId = taskId,
-                                status = if (isSuccess) TaskStatus.SUCCEEDED else TaskStatus.FAILED,
-                                completedAt = completionTime,
-                                resultSummary = responseText,
-                                errorDetails = if (!isSuccess) bridgeResponse.error else null
-                            )
-
-                            val assistantMessage = ChatMessage(
-                                id = UUID.randomUUID().toString(),
-                                sender = MessageSender.ASSISTANT,
-                                content = responseText,
-                                timestamp = completionTime,
-                                taskId = taskId,
-                                isError = !isSuccess
-                            )
-                            chatRepository.insertMessage(assistantMessage)
-
-                            return@withTimeout if (isSuccess) {
-                                AgentExecutionResult.Success(
-                                    taskId = taskId,
-                                    userMessage = userMessage,
-                                    assistantMessage = assistantMessage,
-                                    executedTools = listOf("ai_app_bridge")
-                                )
-                            } else {
-                                AgentExecutionResult.Failure(
-                                    taskId = taskId,
-                                    userMessage = userMessage,
-                                    assistantMessage = assistantMessage,
-                                    errorMessage = bridgeResponse.error ?: "AI App Bridge failed"
-                                )
-                            }
-                        }
-                    }
-
-                    is LocalPlanResult.Ambiguous -> {
-                        val completionTime = System.currentTimeMillis()
-                        val assistantMessage = ChatMessage(
-                            id = UUID.randomUUID().toString(),
-                            sender = MessageSender.ASSISTANT,
-                            content = planResult.clarificationMessage,
-                            timestamp = completionTime,
-                            taskId = taskId,
-                            isError = false
-                        )
-                        chatRepository.insertMessage(assistantMessage)
-                        return@withTimeout AgentExecutionResult.Success(
-                            taskId = taskId,
-                            userMessage = userMessage,
-                            assistantMessage = assistantMessage
-                        )
-                    }
+                val initialStateKey = localTaskPlanner.extractGeneralizedInitialState(trimmed, initialObservation.packageName)
+                val recalled = experienceRepository.recallStrategy(taskCategory, initialStateKey)
+                    ?: experienceRepository.recallCategoryStrategies(taskCategory).firstOrNull()
+                taskState.recalledStrategy = recalled
+                if (recalled != null) {
+                    OmniLogger.i(tag, "Recalled previous strategy with ${recalled.successCount} successes.")
+                    onProgress?.invoke("Recalled learned strategy for $taskCategory...")
                 }
 
-                // 5. Multi-turn Agent Execution Loop
-                onProgress?.invoke("Understanding your request...")
-                val toolSchemas = toolRegistry.getAllDefinitions().map { it.toAiSchema() }
+                var isDone = false
 
-                // Load recent context
-                val recentMessages = chatRepository.getMessages().firstOrNull()?.takeLast(MAX_CONTEXT_MESSAGES) ?: emptyList()
-                val history = recentMessages.filter { it.id != userMessage.id }.map { msg ->
-                    AiMessage(
-                        role = if (msg.sender == MessageSender.USER) AiRole.USER else AiRole.MODEL,
-                        text = msg.content
-                    )
-                }.toMutableList()
-
-                // Append the current user request turn
-                history.add(AiMessage(role = AiRole.USER, text = trimmed))
-
-                val executedTools = mutableListOf<String>()
-                val config = aiConfigRepository.getConfig().firstOrNull() ?: com.omni.assistant.ai.config.AiConfig()
-                val maxIterations = config.maxIterations.coerceIn(1, 10)
-                var currentIteration = 0
-                var finalAnswerText: String? = null
-                var hasError = false
-                var errorSummary: String? = null
-                var consecutiveFailures = 0
-                val maxConsecutiveFailures = 3
-
-                while (currentIteration < maxIterations) {
+                // REUSABLE AGENT LOOP
+                while (taskState.currentStep < MAX_EXECUTION_STEPS && !isDone) {
+                    taskState.currentStep++
                     coroutineContext.ensureActive()
-                    currentIteration++
-                    OmniLogger.d(tag, "Agent iteration $currentIteration of $maxIterations")
 
-                    val aiRequest = AiRequest(
-                        prompt = "",
-                        conversationHistory = history,
-                        tools = toolSchemas,
-                        systemInstruction = "You are Omni, a personal AI assistant on Android. Answer user queries by selecting and invoking available tools. You have access to device info tools and accessibility automation tools (get_accessibility_status, get_ui_snapshot, launch_app, tap_element, enter_text, scroll_ui, navigate_back). For UI automation: 1) Verify accessibility status if needed, 2) Launch target app if needed, 3) Inspect screen with get_ui_snapshot, 4) Interact using snapshot element IDs (e.g. 'e1'), 5) Verify outcome using the fresh snapshot returned, 6) Stop safely and formulate concise, helpful final responses grounded in tool results."
-                    )
+                    val currentStep = taskState.currentStep
+                    var nextToolName: String? = null
+                    var nextToolArgs: Map<String, Any?> = emptyMap()
 
-                    val aiResponse = cloudAiProvider.generateResponse(aiRequest)
+                    // Step 1: LocalTaskPlanner takes priority
+                    if (currentStep == 1) {
+                        val planResult = localTaskPlanner.plan(trimmed, preferredAiApp)
+                        when (planResult) {
+                            is LocalPlanResult.UserConfirmation -> {
+                                val recentTasks = taskRepository.getRecentTasks(3).firstOrNull() ?: emptyList()
+                                val pendingTask = recentTasks.find { it.status == TaskStatus.AWAITING_CONFIRMATION }
 
-                    if (!aiResponse.isHandled) {
-                        hasError = true
-                        errorSummary = aiResponse.replyText ?: "Provider returned an unhandled response."
-                        break
+                                if (pendingTask != null) {
+                                    if (planResult.isConfirmed) {
+                                        onProgress?.invoke("Authorizing and sending message...")
+                                        val messagingRequest = com.omni.assistant.automation.messaging.MessagingCommandParser.parse(pendingTask.request)
+                                        if (messagingRequest != null) {
+                                            nextToolName = "send_whatsapp_message"
+                                            nextToolArgs = mapOf(
+                                                "recipient" to messagingRequest.recipient,
+                                                "message" to messagingRequest.messageText,
+                                                "autoSend" to true
+                                            )
+                                        } else {
+                                            taskState.finalResponseText = "Confirmed pending task '${pendingTask.request}'."
+                                            taskState.status = TaskStatus.SUCCEEDED
+                                            isDone = true
+                                        }
+                                    } else {
+                                        onProgress?.invoke("Cancelling pending action...")
+                                        taskRepository.updateTaskStatus(
+                                            taskId = pendingTask.id,
+                                            status = TaskStatus.CANCELLED,
+                                            completedAt = System.currentTimeMillis(),
+                                            resultSummary = "Task cancelled by user"
+                                        )
+                                        taskState.finalResponseText = "Pending action for '${pendingTask.request}' was cancelled."
+                                        taskState.status = TaskStatus.CANCELLED
+                                        isDone = true
+                                    }
+                                } else {
+                                    taskState.finalResponseText = if (planResult.isConfirmed) "Acknowledged." else "Cancelled."
+                                    taskState.status = TaskStatus.SUCCEEDED
+                                    isDone = true
+                                }
+                            }
+
+                            is LocalPlanResult.Ambiguous -> {
+                                taskState.finalResponseText = planResult.clarificationMessage
+                                taskState.status = TaskStatus.SUCCEEDED
+                                isDone = true
+                            }
+
+                            is LocalPlanResult.DirectToolExecution -> {
+                                nextToolName = planResult.toolName
+                                var effectiveArgs = planResult.arguments
+                                if (nextToolName == "send_whatsapp_message" && !effectiveArgs.containsKey("autoSend")) {
+                                    val isAutoSend = settingsRepository.isMessagingAutoSendEnabled().firstOrNull() ?: false
+                                    effectiveArgs = effectiveArgs + ("autoSend" to isAutoSend)
+                                }
+                                nextToolArgs = effectiveArgs
+                                onProgress?.invoke(planResult.description)
+                            }
+
+                            is LocalPlanResult.NeedsAiBridge -> {
+                                if (planResult.isDirectQuery) {
+                                    val targetApp = if (planResult.targetApp != SupportedAiApp.AUTO) planResult.targetApp else preferredAiApp
+                                    onProgress?.invoke("Asking ${targetApp.displayName}...")
+                                    val bridgeResponse = aiAppBridge.askInstalledAiApp(
+                                        query = AiBridgeQuery(
+                                            prompt = planResult.prompt,
+                                            targetApp = targetApp,
+                                            returnToPackage = "com.omni.assistant.debug"
+                                        ),
+                                        onProgress = onProgress
+                                    )
+                                    if (bridgeResponse.success) {
+                                        taskState.finalResponseText = bridgeResponse.responseText ?: "Received response from ${targetApp.displayName}."
+                                        taskState.status = TaskStatus.SUCCEEDED
+                                    } else {
+                                        taskState.finalErrorText = bridgeResponse.error ?: "Failed to get response from ${targetApp.displayName}."
+                                        taskState.finalResponseText = taskState.finalErrorText
+                                        taskState.status = TaskStatus.FAILED
+                                    }
+                                    isDone = true
+                                }
+                            }
+                        }
                     }
 
-                    // Check if model requested tool calls
-                    if (aiResponse.toolCalls.isNotEmpty()) {
-                        val toolResults = mutableListOf<AiToolResult>()
+                    if (isDone) break
 
-                        for (toolCall in aiResponse.toolCalls) {
-                            coroutineContext.ensureActive()
-                            val toolName = toolCall.name
-                            OmniLogger.i(tag, "Model requested tool: $toolName with args: ${toolCall.arguments}")
+                    // Step > 1 or NeedsAiBridge: Screen Observation + Reasoning
+                    if (nextToolName == null) {
+                        onProgress?.invoke("Observing screen state...")
+                        val liveSnapshot = AccessibilityConnectionManager.takeSnapshot()
+                        val liveObservation = ObservationClassifier.classify(liveSnapshot)
+                        taskState.lastObservedSummary = liveObservation.compactSummary
+                        taskState.observedStateTransitions.add(liveObservation.toStateKey())
 
-                            val registeredTool = toolRegistry.getTool(toolName)
-                            if (registeredTool == null) {
-                                OmniLogger.w(tag, "Rejecting unknown tool: $toolName")
-                                toolResults.add(
-                                    AiToolResult(
-                                        toolCallId = toolCall.id,
-                                        toolName = toolName,
-                                        content = mapOf(
-                                            "success" to false,
-                                            "error" to "Tool '$toolName' is not registered or supported."
-                                        )
-                                    )
-                                )
-                                continue
-                            }
-
-                            // Evaluate policy
-                            val policy = actionPolicy.evaluate(registeredTool.definition, toolCall.arguments)
-                            if (policy is PolicyDecision.Deny) {
-                                OmniLogger.w(tag, "Tool execution denied by policy: ${policy.reason}")
-                                toolResults.add(
-                                    AiToolResult(
-                                        toolCallId = toolCall.id,
-                                        toolName = toolName,
-                                        content = mapOf(
-                                            "success" to false,
-                                            "error" to "Action denied by security policy: ${policy.reason}"
-                                        )
-                                    )
-                                )
-                                continue
-                            }
-
-                            onProgress?.invoke("Executing ${toolName.replace('_', ' ')}...")
-                            executedTools.add(toolName)
-
-                            val executionResult = commandDispatcher.dispatch(toolName, toolCall.arguments)
-                            toolResults.add(
-                                AiToolResult(
-                                    toolCallId = toolCall.id,
-                                    toolName = toolName,
-                                    content = executionResult.data ?: mapOf(
-                                        "success" to executionResult.success,
-                                        "summary" to executionResult.summaryText,
-                                        "error" to executionResult.error
-                                    )
-                                )
-                            )
-                        }
-
-                        val anySuccess = toolResults.any { 
-                            val content = it.content
-                            (content["success"] as? Boolean) != false && content["error"] == null
-                        }
-                        if (anySuccess) {
-                            consecutiveFailures = 0
-                        } else {
-                            consecutiveFailures++
-                        }
-
-                        // Add model turn with tool calls and tool responses to history
-                        history.add(
-                            AiMessage(
-                                role = AiRole.MODEL,
-                                text = aiResponse.replyText,
-                                toolCalls = aiResponse.toolCalls,
-                                rawContentJson = aiResponse.rawContentJson
-                            )
-                        )
-                        history.add(
-                            AiMessage(
-                                role = AiRole.TOOL,
-                                toolResults = toolResults
-                            )
+                        val reasoningPrompt = buildReasoningPrompt(
+                            goal = trimmed,
+                            observation = liveObservation,
+                            stepCount = currentStep,
+                            executedTools = taskState.executedActions,
+                            recalledStrategy = taskState.recalledStrategy
                         )
 
-                        if (consecutiveFailures >= maxConsecutiveFailures) {
-                            hasError = true
-                            errorSummary = "Stopped automation: $maxConsecutiveFailures consecutive action failures occurred."
+                        onProgress?.invoke("Reasoning with on-device AI...")
+                        val bridgeResponse = aiAppBridge.askInstalledAiApp(
+                            query = AiBridgeQuery(
+                                prompt = reasoningPrompt,
+                                targetApp = preferredAiApp,
+                                returnToPackage = "com.omni.assistant.debug"
+                            ),
+                            onProgress = onProgress
+                        )
+
+                        if (!bridgeResponse.success) {
+                            taskState.status = TaskStatus.FAILED
+                            taskState.finalErrorText = bridgeResponse.error ?: "AI reasoning application could not be reached."
+                            taskState.finalResponseText = taskState.finalErrorText
+                            isDone = true
                             break
                         }
 
-                        onProgress?.invoke("Synthesizing results...")
-                        // Continue loop to receive grounded final response
-                    } else if (!aiResponse.replyText.isNullOrBlank()) {
-                        finalAnswerText = aiResponse.replyText
+                        val rawAiText = bridgeResponse.responseText ?: ""
+                        val proposal = AiActionParser.parse(rawAiText)
+
+                        if (proposal == null || proposal.action == "finish") {
+                            taskState.finalResponseText = proposal?.message ?: rawAiText.ifBlank { "Operation completed successfully." }
+                            taskState.status = TaskStatus.SUCCEEDED
+                            isDone = true
+                            break
+                        }
+
+                        nextToolName = proposal.action
+                        nextToolArgs = proposal.arguments
+                    }
+
+                    // Check tool registration
+                    val toolToRun = toolRegistry.getTool(nextToolName)
+                    if (toolToRun == null) {
+                        OmniLogger.w(tag, "Unrecognized tool '$nextToolName'.")
+                        taskState.finalResponseText = "Unrecognized tool '$nextToolName'."
+                        taskState.status = TaskStatus.FAILED
+                        isDone = true
                         break
+                    }
+
+                    // ACT
+                    taskState.lastAction = nextToolName
+                    onProgress?.invoke("Executing ${nextToolName.replace('_', ' ')}...")
+                    val toolResult = commandDispatcher.dispatch(nextToolName, nextToolArgs)
+                    taskState.executedActions.add(nextToolName)
+                    taskState.lastActionResult = toolResult.summaryText
+
+                    // Check for Confirmation State
+                    if (toolResult.data?.get("state") == "AWAITING_CONFIRMATION") {
+                        taskState.status = TaskStatus.AWAITING_CONFIRMATION
+                        taskState.finalResponseText = toolResult.summaryText
+                        taskState.pendingConfirmation = true
+                        isDone = true
+                        break
+                    }
+
+                    // OBSERVE AGAIN & VERIFY
+                    delay(800)
+                    val postSnapshot = AccessibilityConnectionManager.takeSnapshot()
+                    val postObservation = ObservationClassifier.classify(postSnapshot)
+                    taskState.observedStateTransitions.add(postObservation.toStateKey())
+
+                    if (!toolResult.success) {
+                        taskState.failedActions.add(nextToolName)
+                        OmniLogger.w(tag, "Step $currentStep tool '$nextToolName' failed: ${toolResult.error}")
+                        if (taskState.retryCount >= 2 || currentStep >= MAX_EXECUTION_STEPS) {
+                            taskState.status = TaskStatus.FAILED
+                            taskState.finalErrorText = toolResult.error ?: toolResult.summaryText
+                            taskState.finalResponseText = taskState.finalErrorText
+                            isDone = true
+                            break
+                        } else {
+                            taskState.retryCount++
+                        }
                     } else {
-                        hasError = true
-                        errorSummary = "AI returned an empty response without tool calls."
-                        break
+                        // Check if task completed
+                        val isSelfTerminating = nextToolName in listOf(
+                            "send_whatsapp_message", "get_battery_info", "get_device_info",
+                            "get_storage_info", "get_app_version", "get_accessibility_status", "get_ui_snapshot"
+                        )
+                        val isMultiStep = trimmed.contains(" and ", ignoreCase = true) || trimmed.contains(" then ", ignoreCase = true)
+
+                        if (isSelfTerminating || (!isMultiStep && currentStep == 1 && nextToolName != "launch_app")) {
+                            taskState.finalResponseText = toolResult.summaryText
+                            taskState.status = TaskStatus.SUCCEEDED
+                            isDone = true
+                            break
+                        }
                     }
                 }
 
-                if (finalAnswerText == null && currentIteration >= maxIterations) {
-                    hasError = true
-                    errorSummary = "Agent reached maximum iteration limit ($maxIterations steps)."
-                }
+                // LEARN from execution (Both Success and Failure)
+                val isSuccess = taskState.status == TaskStatus.SUCCEEDED || taskState.status == TaskStatus.AWAITING_CONFIRMATION
+                val experience = ExperienceRecord(
+                    id = UUID.randomUUID().toString(),
+                    taskCategory = taskCategory,
+                    generalizedInitialState = initialStateKey,
+                    intendedOutcome = intendedOutcome,
+                    actionsAttempted = taskState.executedActions.toList(),
+                    stateTransitions = taskState.observedStateTransitions.toList(),
+                    successfulActions = if (isSuccess) taskState.executedActions.toList() else emptyList(),
+                    failedActions = taskState.failedActions.toList(),
+                    finalOutcome = if (isSuccess) ExperienceOutcome.SUCCESS else ExperienceOutcome.FAILURE,
+                    failureCategory = taskState.finalErrorText,
+                    executionDurationMs = System.currentTimeMillis() - timestamp
+                )
+                experienceRepository.recordExperience(experience)
 
                 val completionTime = System.currentTimeMillis()
-                val responseContent = finalAnswerText ?: errorSummary ?: "Operation concluded without output."
-                val isSuccess = !hasError && finalAnswerText != null
+                val responseContent = taskState.finalResponseText ?: taskState.finalErrorText ?: "Task completed."
 
                 taskRepository.updateTaskStatus(
                     taskId = taskId,
-                    status = if (isSuccess) TaskStatus.SUCCEEDED else TaskStatus.FAILED,
+                    status = taskState.status,
                     completedAt = completionTime,
-                    resultSummary = if (isSuccess) responseContent else "Execution failed",
-                    errorDetails = if (!isSuccess) errorSummary else null
+                    resultSummary = responseContent,
+                    errorDetails = taskState.finalErrorText
                 )
 
                 val assistantMessage = ChatMessage(
@@ -414,14 +383,14 @@ class AgentOrchestrator(
                         taskId = taskId,
                         userMessage = userMessage,
                         assistantMessage = assistantMessage,
-                        executedTools = executedTools
+                        executedTools = taskState.executedActions
                     )
                 } else {
                     AgentExecutionResult.Failure(
                         taskId = taskId,
                         userMessage = userMessage,
                         assistantMessage = assistantMessage,
-                        errorMessage = errorSummary ?: "Unknown failure"
+                        errorMessage = taskState.finalErrorText ?: "Task failed"
                     )
                 }
             }
@@ -443,6 +412,23 @@ class AgentOrchestrator(
                 isError = false
             )
             chatRepository.insertMessage(assistantMessage)
+
+            // Learn cancellation
+            experienceRepository.recordExperience(
+                ExperienceRecord(
+                    id = UUID.randomUUID().toString(),
+                    taskCategory = taskCategory,
+                    generalizedInitialState = localTaskPlanner.extractGeneralizedInitialState(trimmed, null),
+                    intendedOutcome = intendedOutcome,
+                    actionsAttempted = taskState.executedActions.toList(),
+                    stateTransitions = taskState.observedStateTransitions.toList(),
+                    successfulActions = emptyList(),
+                    failedActions = emptyList(),
+                    finalOutcome = ExperienceOutcome.CANCELLED,
+                    executionDurationMs = System.currentTimeMillis() - timestamp
+                )
+            )
+
             return AgentExecutionResult.Cancelled(taskId)
         } catch (e: Exception) {
             OmniLogger.e(tag, "Unexpected error during agent orchestration", e)
@@ -464,12 +450,56 @@ class AgentOrchestrator(
                 isError = true
             )
             chatRepository.insertMessage(assistantMessage)
+
             return AgentExecutionResult.Failure(
                 taskId = taskId,
                 userMessage = userMessage,
                 assistantMessage = assistantMessage,
                 errorMessage = errorMsg
             )
+        } finally {
+            // CLEAN UP: Purge temporary task workspace and transient memory snapshots
+            snapshotLifecycleManager.cleanupTaskWorkspace(taskId)
+            AccessibilityConnectionManager.clearSnapshots()
         }
+    }
+
+    private fun buildReasoningPrompt(
+        goal: String,
+        observation: ScreenObservation,
+        stepCount: Int,
+        executedTools: List<String>,
+        recalledStrategy: ExperienceRecord?
+    ): String {
+        val elementList = observation.rawSnapshot.elements.take(25).joinToString("\n") { elem ->
+            val desc = elem.text ?: elem.contentDescription ?: ""
+            "- [${elem.id}] class=${elem.className.substringAfterLast('.')} text=\"$desc\" bounds=${elem.bounds.toCompactString()}"
+        }
+        val toolDefs = toolRegistry.getAllDefinitions().joinToString("\n") { def ->
+            val params = def.parameters.joinToString(", ") { "${it.name}: ${it.type}" }
+            "- ${def.name}($params): ${def.description}"
+        }
+
+        val strategyHint = if (recalledStrategy != null && recalledStrategy.successfulActions.isNotEmpty()) {
+            "\nPrior verified successful action sequence for this category: [${recalledStrategy.successfulActions.joinToString(" -> ")}]"
+        } else ""
+
+        return """
+        Goal: $goal$strategyHint
+        Step: $stepCount (Completed so far: ${executedTools.joinToString(", ").ifBlank { "None" }})
+        Current Screen Observation: ${observation.compactSummary}
+        Visible Screen Elements:
+        $elementList
+
+        Available Tools:
+        $toolDefs
+
+        Instructions:
+        If you want to perform an action on screen, respond with ONLY valid JSON:
+        {"thought": "reasoning", "action": "tool_name", "arguments": {"param": "value"}}
+
+        If the goal is finished or you are answering the user, respond with ONLY valid JSON:
+        {"thought": "reasoning", "action": "finish", "message": "your final response"}
+        """.trimIndent()
     }
 }

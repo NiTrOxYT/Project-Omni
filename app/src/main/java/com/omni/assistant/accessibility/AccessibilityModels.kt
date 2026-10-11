@@ -18,6 +18,7 @@ data class UiBounds(
 data class UiElement(
     val id: String,
     val className: String,
+    val resourceId: String? = null,
     val text: String? = null,
     val contentDescription: String? = null,
     val isClickable: Boolean = false,
@@ -33,6 +34,7 @@ data class UiElement(
     fun toCompactMap(): Map<String, Any?> = buildMap {
         put("id", id)
         put("class", className.substringAfterLast('.'))
+        if (!resourceId.isNullOrBlank()) put("resourceId", resourceId)
         if (!text.isNullOrBlank()) put("text", text)
         if (!contentDescription.isNullOrBlank()) put("desc", contentDescription)
         if (isClickable) put("clickable", true)

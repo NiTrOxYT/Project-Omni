@@ -15,4 +15,7 @@ interface SettingsRepository {
 
     fun getPreferredAiApp(): Flow<SupportedAiApp>
     suspend fun setPreferredAiApp(app: SupportedAiApp)
+
+    fun isMessagingAutoSendEnabled(): Flow<Boolean>
+    suspend fun setMessagingAutoSendEnabled(enabled: Boolean)
 }

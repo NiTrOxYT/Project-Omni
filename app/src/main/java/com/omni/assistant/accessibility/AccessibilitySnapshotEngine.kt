@@ -6,8 +6,8 @@ import java.util.UUID
 
 object AccessibilitySnapshotEngine {
 
-    const val MAX_SNAPSHOT_ELEMENTS = 60
-    const val MAX_TREE_DEPTH = 12
+    const val MAX_SNAPSHOT_ELEMENTS = 120
+    const val MAX_TREE_DEPTH = 64
     const val MAX_TEXT_LENGTH = 120
 
     private val SENSITIVE_KEYWORDS = setOf(
@@ -57,7 +57,10 @@ object AccessibilitySnapshotEngine {
 
             totalNodesTraversed++
 
-            val isVisible = node.isVisibleToUser
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            val isOnScreen = rect.width() > 0 && rect.height() > 0 && rect.right > 0 && rect.bottom > 0
+            val isVisible = node.isVisibleToUser || isOnScreen
             if (isVisible) {
                 val rawText = node.text?.toString()
                 val rawDesc = node.contentDescription?.toString()
@@ -66,7 +69,7 @@ object AccessibilitySnapshotEngine {
                 val hasText = !rawText.isNullOrBlank()
                 val hasDesc = !rawDesc.isNullOrBlank()
                 val isClickable = node.isClickable
-                val isEditable = node.isEditable
+                val isEditable = node.isEditable || node.className?.contains("EditText", ignoreCase = true) == true
                 val isScrollable = node.isScrollable
                 val isCheckable = node.isCheckable
                 val isFocusable = node.isFocusable
@@ -75,8 +78,6 @@ object AccessibilitySnapshotEngine {
                 val isInteresting = isClickable || isEditable || isScrollable || isCheckable || hasText || hasDesc || isFocusable
 
                 if (isInteresting) {
-                    val rect = Rect()
-                    node.getBoundsInScreen(rect)
 
                     val actionsList = mutableListOf<String>()
                     if (isClickable) actionsList.add("click")
@@ -89,6 +90,7 @@ object AccessibilitySnapshotEngine {
                         UiElement(
                             id = elementId,
                             className = node.className?.toString() ?: "View",
+                            resourceId = node.viewIdResourceName,
                             text = sanitizeText(rawText, isSens),
                             contentDescription = sanitizeText(rawDesc, isSens),
                             isClickable = isClickable,
@@ -126,6 +128,7 @@ object AccessibilitySnapshotEngine {
 
         val summary = buildSummary(packageName, collectedElements, totalNodesTraversed)
 
+        com.omni.assistant.core.logging.OmniLogger.d("OmniA11ySnapshot", "createSnapshot: pkg=$packageName, traversed=$totalNodesTraversed, collected=${collectedElements.size}")
         return UiSnapshot(
             snapshotId = snapshotId,
             timestamp = timestamp,

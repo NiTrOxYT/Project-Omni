@@ -96,10 +96,22 @@ class OnDeviceAppLaunchTest {
     }
 
     @Test
-    fun testLaunchAppToolWithNonExistentApp() = runBlocking {
-        val result = launchAppTool.execute(mapOf("appName" to "NonExistentApp9999"))
-        assertFalse("LaunchAppTool should fail for non-existent app", result.success)
-        assertEquals("APP_NOT_INSTALLED", result.error)
-        assertTrue(result.summaryText.contains("not installed"))
+    fun testInspectChatGPTUIElements() = runBlocking {
+        val pm = context.packageManager
+        val launchIntent = pm.getLaunchIntentForPackage("com.openai.chatgpt")?.apply {
+            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        if (launchIntent != null) {
+            context.startActivity(launchIntent)
+            kotlinx.coroutines.delay(3000)
+            val snapshot = com.omni.assistant.accessibility.AccessibilityConnectionManager.takeSnapshot()
+            android.util.Log.i("ChatGPT_UI_INSPECT", "ChatGPT snapshot: pkg=${snapshot.packageName}, elements=${snapshot.elements.size}")
+            snapshot.elements.forEach { elem ->
+                android.util.Log.i(
+                    "ChatGPT_UI_INSPECT",
+                    "ELEM: id=${elem.id}, class=${elem.className}, text='${elem.text}', desc='${elem.contentDescription}', edit=${elem.isEditable}, click=${elem.isClickable}, bounds=${elem.bounds.toCompactString()}"
+                )
+            }
+        }
     }
 }

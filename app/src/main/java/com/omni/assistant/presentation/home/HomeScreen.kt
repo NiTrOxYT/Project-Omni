@@ -600,6 +600,7 @@ fun RecentTaskItem(task: TaskItem) {
     val statusColor = when (task.status) {
         TaskStatus.SUCCEEDED -> StatusSuccess
         TaskStatus.RUNNING -> AccentCyan
+        TaskStatus.AWAITING_CONFIRMATION -> StatusWarning
         TaskStatus.PENDING -> StatusWarning
         TaskStatus.FAILED -> StatusError
         TaskStatus.CANCELLED -> TextTertiaryDark

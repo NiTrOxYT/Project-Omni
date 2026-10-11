@@ -86,10 +86,13 @@ class AgentOrchestratorTest {
     private val fakeSettingsRepo = object : SettingsRepository {
         var theme = AppThemeMode.DARK
         var preferredApp = SupportedAiApp.AUTO
+        var autoSend = false
         override fun getThemeMode(): Flow<AppThemeMode> = flowOf(theme)
         override suspend fun setThemeMode(mode: AppThemeMode) { theme = mode }
         override fun getPreferredAiApp(): Flow<SupportedAiApp> = flowOf(preferredApp)
         override suspend fun setPreferredAiApp(app: SupportedAiApp) { preferredApp = app }
+        override fun isMessagingAutoSendEnabled(): Flow<Boolean> = flowOf(autoSend)
+        override suspend fun setMessagingAutoSendEnabled(enabled: Boolean) { autoSend = enabled }
     }
 
     private class FakeConfigRepo(var config: AiConfig) : AiConfigRepository {
@@ -148,6 +151,23 @@ class AgentOrchestratorTest {
         localPlanner = LocalTaskPlanner(toolRegistry, fakeAppInventory, fakeBridge)
     }
 
+    private val fakeExperienceRepo = object : com.omni.assistant.domain.repository.ExperienceRepository {
+        val records = mutableListOf<com.omni.assistant.domain.model.ExperienceRecord>()
+        override suspend fun recordExperience(experience: com.omni.assistant.domain.model.ExperienceRecord) {
+            records.add(experience)
+        }
+        override suspend fun recallStrategy(taskCategory: String, initialState: String): com.omni.assistant.domain.model.ExperienceRecord? {
+            return records.find { it.taskCategory == taskCategory }
+        }
+        override suspend fun recallCategoryStrategies(taskCategory: String): List<com.omni.assistant.domain.model.ExperienceRecord> {
+            return records.filter { it.taskCategory == taskCategory }
+        }
+        override fun getAllExperiences(): Flow<List<com.omni.assistant.domain.model.ExperienceRecord>> = flowOf(records)
+        override suspend fun clearAllExperiences() { records.clear() }
+    }
+
+    private val fakeLifecycleManager = com.omni.assistant.accessibility.lifecycle.SnapshotLifecycleManager(null)
+
     private fun createOrchestrator(
         cloudProvider: AiProvider,
         configRepo: AiConfigRepository
@@ -162,7 +182,9 @@ class AgentOrchestratorTest {
             actionPolicy = policy,
             commandDispatcher = dispatcher,
             chatRepository = fakeChatRepo,
-            taskRepository = fakeTaskRepo
+            taskRepository = fakeTaskRepo,
+            experienceRepository = fakeExperienceRepo,
+            snapshotLifecycleManager = fakeLifecycleManager
         )
     }
 
@@ -190,20 +212,83 @@ class AgentOrchestratorTest {
     }
 
     @Test
-    fun testAiBridgeQueryExecutionThroughOrchestrator() = runBlocking {
-        val fakeCloudProvider = object : AiProvider {
-            override suspend fun generateResponse(request: AiRequest): AiResponse {
-                throw AssertionError("Cloud provider should not be called when bridge handles query")
+    fun testAiActionProposalLoopExecution() = runBlocking {
+        val proposalBridge = object : AiAppBridge(null) {
+            override fun discoverInstalledAiApps(): List<InstalledAiApp> = listOf(
+                InstalledAiApp(SupportedAiApp.CHATGPT, isInstalled = true, packageName = "com.openai.chatgpt", appLabel = "ChatGPT", versionName = "1.0")
+            )
+            override fun getPreferredOrAvailablePackage(preferred: SupportedAiApp): String? = "com.openai.chatgpt"
+            override suspend fun askInstalledAiApp(query: AiBridgeQuery, onProgress: ((String) -> Unit)?): AiBridgeResponse {
+                return AiBridgeResponse(
+                    success = true,
+                    prompt = query.prompt,
+                    responseText = """
+                    ```json
+                    {
+                      "thought": "User wants to inspect battery",
+                      "action": "get_battery_info",
+                      "arguments": {}
+                    }
+                    ```
+                    """.trimIndent(),
+                    appUsed = "ChatGPT"
+                )
             }
         }
 
-        val configRepo = FakeConfigRepo(AiConfig(apiKey = ""))
-        val orchestrator = createOrchestrator(fakeCloudProvider, configRepo)
+        val dummyCloudProvider = object : AiProvider {
+            override suspend fun generateResponse(request: AiRequest): AiResponse {
+                throw AssertionError("Cloud provider should not be called")
+            }
+        }
 
-        val result = orchestrator.execute("Ask ChatGPT what is Kotlin")
+        val orchestrator = AgentOrchestrator(
+            cloudAiProvider = dummyCloudProvider,
+            localTaskPlanner = localPlanner,
+            aiAppBridge = proposalBridge,
+            settingsRepository = fakeSettingsRepo,
+            aiConfigRepository = FakeConfigRepo(AiConfig()),
+            toolRegistry = toolRegistry,
+            actionPolicy = policy,
+            commandDispatcher = dispatcher,
+            chatRepository = fakeChatRepo,
+            taskRepository = fakeTaskRepo,
+            experienceRepository = fakeExperienceRepo,
+            snapshotLifecycleManager = fakeLifecycleManager
+        )
 
+        val result = orchestrator.execute("Explain why my phone is warm and check it")
         assertTrue(result is AgentExecutionResult.Success)
         val success = result as AgentExecutionResult.Success
-        assertTrue(success.assistantMessage.content.contains("On-device AI response"))
+        assertEquals("Battery: 82% (Charging)", success.assistantMessage.content)
+        assertTrue(success.executedTools.contains("get_battery_info"))
+    }
+
+    @Test
+    fun testAiActionParser() {
+        val rawMarkdown = """
+        Here is the planned action:
+        ```json
+        {
+          "thought": "I should open WhatsApp",
+          "action": "launch_app",
+          "arguments": {
+            "appName": "WhatsApp"
+          }
+        }
+        ```
+        """.trimIndent()
+
+        val parsed = com.omni.assistant.ai.orchestrator.AiActionParser.parse(rawMarkdown)
+        assertNotNull(parsed)
+        assertEquals("launch_app", parsed!!.action)
+        assertEquals("WhatsApp", parsed.arguments["appName"])
+        assertEquals("I should open WhatsApp", parsed.thought)
+
+        val finishJson = """{"thought": "done", "action": "finish", "message": "Everything is ready."}"""
+        val parsedFinish = com.omni.assistant.ai.orchestrator.AiActionParser.parse(finishJson)
+        assertNotNull(parsedFinish)
+        assertEquals("finish", parsedFinish!!.action)
+        assertEquals("Everything is ready.", parsedFinish.message)
     }
 }
